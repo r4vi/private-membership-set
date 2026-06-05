@@ -1,0 +1,7 @@
+[tools]
+python = "3.14"
+uv = "latest"
+
+[tasks]
+test = "uv run pytest"
+run = "uv run python private_membership.py"

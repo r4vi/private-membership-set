@@ -1,0 +1,13 @@
+[project]
+name = "private-membership-set"
+version = "0.1.0"
+description = "Pure Python implementation of Private Set Membership (PSM) protocol for educational purposes"
+requires-python = ">=3.14"
+dependencies = []
+
+[tool.pytest.ini_options]
+testpaths = ["."]
+python_files = ["test_*.py"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
