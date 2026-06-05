@@ -107,3 +107,10 @@ Paillier linear PIR is correct — `Πᵢ E(qᵢ)^(bucket[i][j]) = E(bucket[targ
 
 ## Why?
 Because I wanted to understand the implementation without all the google / bazel bullshit
+
+## More Reading
+
+* https://engineering.fb.com/2019/03/01/security/homomorphic-hashing/
+* https://www.usenix.org/system/files/conference/usenixsecurity14/sec14-paper-pinkas.pdf
+* http://www.pinkas.net/PAPERS/FNP04.pdf
+* https://eprint.iacr.org/2017/677.pdf
