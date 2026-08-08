@@ -1,7 +1,6 @@
 import hashlib
 import random
 import math
-from typing import Optional
 
 """
 Pure Python Implementation of Private Set Membership (PSM).
@@ -28,12 +27,39 @@ OPRF_PRIME = 2**256 - 189
 # --- Math Utilities ---
 
 def is_prime(n, k=5):
-    """Miller-Rabin primality test (simplified)."""
-    if n <= 1: return False
-    if n <= 3: return True
+    """Miller-Rabin probabilistic primality test.
+
+    Deterministically correct for n < 1369 (trial division by small primes);
+    for larger n the error probability is at most 4^-k.
+    Note: the previous version was Fermat's test, which accepts Carmichael
+    numbers whenever the random bases are all coprime to n.
+    """
+    if n < 2:
+        return False
+    small_primes = (2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37)
+    for sp in small_primes:
+        if n == sp:
+            return True
+        if n % sp == 0:
+            return False
+
+    # Write n - 1 = d * 2^s with d odd
+    d = n - 1
+    s = 0
+    while d % 2 == 0:
+        d //= 2
+        s += 1
+
     for _ in range(k):
         a = random.randint(2, n - 2)
-        if pow(a, n - 1, n) != 1:
+        x = pow(a, d, n)
+        if x == 1 or x == n - 1:
+            continue
+        for _ in range(s - 1):
+            x = (x * x) % n
+            if x == n - 1:
+                break
+        else:
             return False
     return True
 
@@ -53,6 +79,11 @@ def lcm(a, b):
 
 class DHOPRF:
     def __init__(self, p=OPRF_PRIME):
+        # The blinding/unblinding math relies on Fermat's little theorem, so p
+        # must be an odd prime. A composite p would silently produce wrong
+        # hashes instead of failing.
+        if p < 3 or p % 2 == 0 or not is_prime(p):
+            raise ValueError(f"DHOPRF requires an odd prime modulus, got p={p}")
         self.p = p
 
     def hash_to_group(self, x):
@@ -122,7 +153,6 @@ class PSMServer:
         self.k = random.randint(2, self.oprf.p - 1)
         self.bucket_count = bucket_count
         self.buckets = [[] for _ in range(bucket_count)]
-        self.n_for_pir: Optional[int] = None # To be provided by client
         self._setup(items)
 
     def _setup(self, items):
@@ -142,14 +172,16 @@ class PSMServer:
     def handle_oprf_request(self, blinded_element):
         return self.oprf.server_sign(blinded_element, self.k)
 
-    def handle_pir_request(self, encrypted_query_vector):
+    def handle_pir_request(self, encrypted_query_vector, n):
         """
         Linear PIR: Compute dot product of query vector and buckets homomorphically.
         Result is an encrypted list containing the hashes of the target bucket.
+
+        n: the client's Paillier modulus (public). Passed per-request so the
+        server never stores client state.
         """
         bucket_size = len(self.buckets[0])
-        assert self.n_for_pir is not None, "Client must provide n for PIR before making requests."
-        n_sq: int = self.n_for_pir**2
+        n_sq: int = n**2
         response = []
 
         for j in range(bucket_size):
@@ -170,6 +202,15 @@ class PSMClient:
     def query(self, server, element):
         print(f"[*] Querying for element: '{element}'")
 
+        # The PIR query vector must be aligned with the server's bucket layout.
+        # A mismatch used to cause silent wrong answers (client with more buckets
+        # than the server) or an unhandled IndexError (client with fewer).
+        if server.bucket_count != self.bucket_count:
+            raise ValueError(
+                f"Bucket count mismatch: server uses {server.bucket_count} buckets, "
+                f"client uses {self.bucket_count}. They must match for PIR to work."
+            )
+
         # --- Phase 1: OPRF ---
         # Get the 'hardened' hash of the element without revealing the element.
         blinded_element, r = self.oprf.client_blind(element)
@@ -181,13 +222,12 @@ class PSMClient:
 
         # --- Phase 2: PIR ---
         # Fetch the entire bucket without the server knowing which one.
-        server.n_for_pir = self.pir.n
         query_vector = []
         for i in range(self.bucket_count):
             val = 1 if i == bucket_idx else 0
             query_vector.append(self.pir.encrypt(val))
 
-        encrypted_response = server.handle_pir_request(query_vector)
+        encrypted_response = server.handle_pir_request(query_vector, self.pir.n)
 
         # Decrypt the hashes in the bucket.
         retrieved_bucket = [self.pir.decrypt(c) for c in encrypted_response]
