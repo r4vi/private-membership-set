@@ -201,21 +201,26 @@ class _BaseBucketizer(Bucketizer):
         record_size: int,
         use_aead: bool,
     ) -> tuple[bool, bytes | None]:
+        from pmset.native import ct_bucket_scan_tag
+
         _, target_tag, aead_key = derive_bucket_and_keys(
             oprf_output, bucket_count=1, mode=self._mode
         )
-        for tag, ct in _unpack_records(bucket_bytes, record_size):
-            if hmac.compare_digest(tag, target_tag):
-                if use_aead:
-                    try:
-                        pt = aead_decrypt(aead_key, ct, aad=target_tag)
-                    except DecryptionError:
-                        continue
-                    if pt and pt[0] == 1:
-                        return True, pt[1:]
-                    return True, None
-                return True, (ct if ct else None)
-        return False, None
+        # Constant-time full scan: ALWAYS checks every record in the bucket (zero early exit!)
+        found, matched_rec = ct_bucket_scan_tag(bucket_bytes, record_size, target_tag)
+        if not found:
+            return False, None
+        ct_len = int.from_bytes(matched_rec[_TAG_LEN : _TAG_LEN + 2], "big")
+        ct = matched_rec[_TAG_LEN + 2 : _TAG_LEN + 2 + ct_len]
+        if use_aead:
+            try:
+                pt = aead_decrypt(aead_key, ct, aad=target_tag)
+            except DecryptionError:
+                return False, None
+            if pt and pt[0] == 1:
+                return True, pt[1:]
+            return True, None
+        return True, (ct if ct else None)
 
 
 class PrefixBucketizer(_BaseBucketizer):
@@ -485,10 +490,12 @@ class GarbledBloomFilter:
         raise RuntimeError("Failed to construct collision-free GarbledBloomFilter")
 
     def verify_shares(self, item: bytes, retrieved_slots: Mapping[int, bytes]) -> bool:
-        """Check XOR of retrieved slot shares against the expected item tag."""
+        """Check XOR of retrieved slot shares against the expected item tag in constant time."""
+        from pmset.native import ct_memcmp, ct_xor_bytes
+
         pos_list = self.positions(item, self.num_slots, self.num_hashes, self.seed)
         acc = bytes(self.lambda_bytes)
         for pos in pos_list:
-            acc = _xor_bytes(acc, retrieved_slots[pos])
+            acc = ct_xor_bytes(acc, retrieved_slots[pos])
         expected = self.item_tag(item, self.seed, self.lambda_bytes)
-        return hmac.compare_digest(acc, expected)
+        return ct_memcmp(acc, expected)

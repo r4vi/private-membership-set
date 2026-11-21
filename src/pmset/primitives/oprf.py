@@ -124,10 +124,12 @@ class ECDHOPRF(OPRF):
         return Z.to_compressed_bytes()
 
     def client_finalize(self, item: bytes, evaluated_element: bytes, blind_state: int) -> bytes:
+        from pmset.native import ct_modinv
+
         Z = ECPoint.from_compressed_bytes(evaluated_element)
         if Z.is_infinity:
             raise ValueError("Server returned identity element in ECDH-OPRF")
-        r_inv = pow(blind_state, -1, P256_N)
+        r_inv = ct_modinv(blind_state, P256_N)
         N = scalar_mul(r_inv, Z)
         return self._finalize(item, N)
 
@@ -198,32 +200,40 @@ class DHOPRF(OPRF):
         ).digest()
 
     def client_blind(self, item: bytes) -> tuple[int, int]:
+        from pmset.native import ct_modexp
+
         h_x = self.hash_to_group(item)
         if self.safe_subgroup:
             # Order q is prime, so every r in [1, q - 1] is invertible mod q
             r = random_int_range(1, self.order - 1)
         else:
             r = random_coprime(self.order)
-        blinded = pow(h_x, r, self.p)
+        blinded = ct_modexp(h_x, r, self.p, order=self.order)
         return blinded, r
 
     def server_evaluate(self, blinded_element: int, server_key: int) -> int:
+        from pmset.native import ct_modexp
+
         if not (1 < blinded_element < self.p):
             raise ValueError("Invalid blinded group element")
-        if self.safe_subgroup and pow(blinded_element, self.order, self.p) != 1:
+        if self.safe_subgroup and ct_modexp(blinded_element, self.order, self.p) != 1:
             raise ValueError("Blinded element is not in the prime-order subgroup G_q")
-        return pow(blinded_element, server_key, self.p)
+        return ct_modexp(blinded_element, server_key, self.p, order=self.order)
 
     def client_finalize(self, item: bytes, evaluated_element: int, blind_state: int) -> bytes:
+        from pmset.native import ct_modexp, ct_modinv
+
         if not (1 < evaluated_element < self.p):
             raise ValueError("Invalid evaluated group element")
-        r_inv = pow(blind_state, -1, self.order)
-        unblinded = pow(evaluated_element, r_inv, self.p)
+        r_inv = ct_modinv(blind_state, self.order)
+        unblinded = ct_modexp(evaluated_element, r_inv, self.p, order=self.order)
         return self._finalize(item, unblinded)
 
     def server_evaluate_direct(self, item: bytes, server_key: int) -> bytes:
+        from pmset.native import ct_modexp
+
         h_x = self.hash_to_group(item)
-        return self._finalize(item, pow(h_x, server_key, self.p))
+        return self._finalize(item, ct_modexp(h_x, server_key, self.p, order=self.order))
 
 
 @dataclass(frozen=True)
@@ -270,6 +280,8 @@ class RSAOPRF(OPRF):
         return cls(e=int(params["e"]), n=int(params["n"]))
 
     def keygen(self) -> RSAOPRFKey:
+        from pmset.native import ct_modinv
+
         half = self.bits // 2
         while True:
             p = generate_prime(half)
@@ -279,7 +291,7 @@ class RSAOPRF(OPRF):
             lam = lcm(p - 1, q - 1)
             if math.gcd(self.e, lam) == 1:
                 n = p * q
-                d = pow(self.e, -1, lam)
+                d = ct_modinv(self.e, lam)
                 self.n = n
                 return RSAOPRFKey(n=n, e=self.e, d=d)
 
@@ -302,28 +314,36 @@ class RSAOPRF(OPRF):
         ).digest()
 
     def client_blind(self, item: bytes) -> tuple[int, int]:
+        from pmset.native import ct_modexp
+
         if self.n == 0:
             raise ValueError("RSAOPRF client requires modulus n from public_params")
         h = self._hash_fdh(item, self.n)
         r = random_coprime(self.n)
-        blinded = (h * pow(r, self.e, self.n)) % self.n
+        blinded = (h * ct_modexp(r, self.e, self.n)) % self.n
         return blinded, r
 
     def server_evaluate(self, blinded_element: int, server_key: RSAOPRFKey) -> int:
+        from pmset.native import ct_modexp
+
         if not (1 < blinded_element < server_key.n):
             raise ValueError("Invalid blinded RSA element")
         if math.gcd(blinded_element, server_key.n) != 1:
             raise ValueError("Blinded RSA element not coprime to modulus")
-        return pow(blinded_element, server_key.d, server_key.n)
+        return ct_modexp(blinded_element, server_key.d, server_key.n)
 
     def client_finalize(self, item: bytes, evaluated_element: int, blind_state: int) -> bytes:
-        r_inv = pow(blind_state, -1, self.n)
+        from pmset.native import ct_modinv
+
+        r_inv = ct_modinv(blind_state, self.n)
         unblinded = (evaluated_element * r_inv) % self.n
         return self._finalize(item, unblinded, self.n)
 
     def server_evaluate_direct(self, item: bytes, server_key: RSAOPRFKey) -> bytes:
+        from pmset.native import ct_modexp
+
         h = self._hash_fdh(item, server_key.n)
-        sig = pow(h, server_key.d, server_key.n)
+        sig = ct_modexp(h, server_key.d, server_key.n)
         return self._finalize(item, sig, server_key.n)
 
 

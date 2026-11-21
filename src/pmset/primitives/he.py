@@ -49,33 +49,39 @@ class PaillierPublicKey:
         return self.n + 1
 
     def encrypt(self, m: int) -> int:
+        from pmset.native import ct_modexp
+
         m_mod = m % self.n
         r = random_coprime(self.n)
         n_sq = self.n_sq
         # Since g = n + 1, (n + 1)^m mod n^2 == (1 + m*n) mod n^2 (binomial theorem!)
         gm = (1 + m_mod * self.n) % n_sq
-        return (gm * pow(r, self.n, n_sq)) % n_sq
+        return (gm * ct_modexp(r, self.n, n_sq)) % n_sq
 
     def add(self, c1: int, c2: int) -> int:
         return (c1 * c2) % self.n_sq
 
     def mul_scalar(self, c: int, k: int) -> int:
-        if k == 0:
-            return 1
+        from pmset.native import ct_modexp, ct_modinv
+
         if k < 0:
-            c = pow(c, -1, self.n_sq)
+            c = ct_modinv(c, self.n_sq)
             k = -k
-        return pow(c, k, self.n_sq)
+        return ct_modexp(c, k, self.n_sq)
 
     def rerandomize(self, c: int) -> int:
+        from pmset.native import ct_modexp
+
         r = random_coprime(self.n)
-        return (c * pow(r, self.n, self.n_sq)) % self.n_sq
+        return (c * ct_modexp(r, self.n, self.n_sq)) % self.n_sq
 
 
 class PaillierHE(AdditiveHE):
-    """Paillier cryptosystem with CSPRNG key generation and fast (n+1)^m encryption."""
+    """Paillier cryptosystem with CSPRNG key generation and constant-time OpenSSL modexp."""
 
     def __init__(self, bits: int = 1024) -> None:
+        from pmset.native import ct_modinv
+
         if bits < 64:
             raise ValueError(f"Paillier key size must be >= 64 bits, got {bits}")
         half = bits // 2
@@ -91,14 +97,16 @@ class PaillierHE(AdditiveHE):
         self.g = self.n + 1
         self.lam = lcm(p - 1, q - 1)
         # L(g^lam mod n^2) = L((1 + lam*n) mod n^2) = lam mod n, so mu = lam^-1 mod n
-        self.mu = pow(self.lam, -1, self.n)
+        self.mu = ct_modinv(self.lam, self.n)
         self.public_key = PaillierPublicKey(n=self.n)
 
     def encrypt(self, m: int) -> int:
         return self.public_key.encrypt(m)
 
     def decrypt(self, c: int) -> int:
-        u = pow(c, self.lam, self.n_sq)
+        from pmset.native import ct_modexp
+
+        u = ct_modexp(c, self.lam, self.n_sq)
         l_u = (u - 1) // self.n
         return (l_u * self.mu) % self.n
 
@@ -169,7 +177,7 @@ class ExponentialElGamalPublicKey:
 
 
 class ExponentialElGamalHE(AdditiveHE):
-    """Additive-in-the-exponent ElGamal on NIST P-256 supporting fast zero-testing."""
+    """Additive-in-the-exponent ElGamal on NIST P-256 supporting constant-time zero-testing."""
 
     def __init__(self, sk: int | None = None) -> None:
         self.sk = sk if sk is not None else random_scalar()
@@ -190,5 +198,25 @@ class ExponentialElGamalHE(AdditiveHE):
         return point_add(ct.c2, -scalar_mul(self.sk, ct.c1))
 
     def is_zero(self, ct: ElGamalCiphertext) -> bool:
-        """Exact zero test: returns True iff ciphertext encrypts 0 mod P256_N."""
+        """Exact constant-time zero test: returns True iff ciphertext encrypts 0 mod P256_N."""
+        from pmset.native import ct_p256_elgamal_is_zero
+
+        res = ct_p256_elgamal_is_zero(
+            self.sk, ct.c1.to_compressed_bytes(), ct.c2.to_compressed_bytes()
+        )
+        if res is not None:
+            return res
         return self.decrypt_point(ct).is_infinity
+
+    def any_zero(self, cts: list[ElGamalCiphertext]) -> bool:
+        """Non-short-circuiting constant-time zero test across all ciphertexts."""
+        from pmset.native import ct_p256_elgamal_any_zero
+
+        wire_pairs = [ct.to_wire() for ct in cts]
+        res = ct_p256_elgamal_any_zero(self.sk, wire_pairs)
+        if res is not None:
+            return res
+        found = 0
+        for ct in cts:
+            found |= 1 if self.is_zero(ct) else 0
+        return bool(found)

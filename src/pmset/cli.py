@@ -83,6 +83,17 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_backend(_args: argparse.Namespace) -> int:
+    info = pmset.backend_info()
+    print("PMSet Constant-Time Native Backend:")
+    print(f"  Available:       {info.available}")
+    print(f"  Strict Mode:     {info.strict_mode} (PMSET_REQUIRE_NATIVE)")
+    print(f"  Library Path:    {info.library_path}")
+    print(f"  ABI Version:     {info.abi_version}")
+    print(f"  OpenSSL Version: {info.openssl_version}")
+    return 0 if info.available else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="pmset",
@@ -91,6 +102,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("list", help="List all registered PMSet protocols and formal specs")
+    sub.add_parser("backend", help="Inspect the active constant-time native C + OpenSSL backend")
 
     p_demo = sub.add_parser("demo", help="Run a live membership query demo")
     p_demo.add_argument(
@@ -113,6 +125,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "list":
         return _cmd_list(args)
+    if args.command == "backend":
+        return _cmd_backend(args)
     if args.command == "demo":
         return _cmd_demo(args)
     if args.command == "verify":

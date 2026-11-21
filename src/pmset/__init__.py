@@ -63,6 +63,15 @@ from pmset.protocols import (
     SHAMIR_MULTISERVER_PIR,
     TWO_SERVER_DPF_PIR,
 )
+from pmset import native
+from pmset.native import (
+    NativeBackendError,
+    NativeBackendInfo,
+    backend_info,
+    build_native_library,
+    is_native_available,
+    require_constant_time,
+)
 from pmset.verification import (
     FormalVerifier,
     LeanVerifier,
@@ -95,6 +104,8 @@ __all__ = [
     "Item",
     "LeanVerifier",
     "MultiServerPMSetServer",
+    "NativeBackendError",
+    "NativeBackendInfo",
     "OPRF_RLWE_PIR",
     "OT_GARBLED_BLOOM",
     "PMSetClient",
@@ -123,18 +134,23 @@ __all__ = [
     "Z3Verifier",
     "__version__",
     "all_protocols",
+    "backend_info",
     "benchmark_protocols",
+    "build_native_library",
     "decode_value",
     "encode_value",
     "execute_batch_query",
     "execute_query",
     "format_benchmark_table",
     "get_protocol",
+    "is_native_available",
     "list_protocols",
+    "native",
     "normalize_dataset",
     "normalize_item",
     "protocol_catalog",
     "register_protocol",
+    "require_constant_time",
     "verify_all_protocols",
     "verify_protocol",
 ]

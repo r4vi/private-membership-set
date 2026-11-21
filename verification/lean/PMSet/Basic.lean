@@ -62,4 +62,42 @@ theorem padded_bucket_membership {α : Type} (target : α) (real dummies : List 
     target ∈ (real ++ dummies) ↔ target ∈ real := by
   simp [List.mem_append, hdisjoint]
 
+/-- **Joye Constant-Bit-Length Exponent Padding Theorem** (used in `pmset_ct_modexp_order`):
+    For any bit-length `L ≥ 1`, subgroup order `ord ∈ [2^(L-1), 2^L - 1]`, and
+    secret exponent `exp < ord`, selecting `e1 = exp + ord` when `e1 ≥ 2^L` and
+    `e2 = exp + 2 * ord` otherwise ALWAYS yields a padded exponent `e` with:
+      1. Exact bit-length `L + 1` (`2^L ≤ e < 2^(L+1)`), and
+      2. Identical residue modulo `ord` (`e % ord = exp`). -/
+theorem joye_constant_bitlen_padding (L ord exp : Nat)
+    (hL : L ≥ 1)
+    (hord_lo : 2 ^ (L - 1) ≤ ord)
+    (hord_hi : ord < 2 ^ L)
+    (hexp : exp < ord) :
+    let e1 := exp + ord
+    let e2 := e1 + ord
+    let padded := if e1 ≥ 2 ^ L then e1 else e2
+    (2 ^ L ≤ padded ∧ padded < 2 ^ (L + 1) ∧ padded % ord = exp) := by
+  intro e1 e2 padded
+  have hpow1 : 2 ^ L = 2 * 2 ^ (L - 1) := by
+    cases L with
+    | zero => omega
+    | succ k => simp [Nat.pow_succ, Nat.mul_comm]
+  have hpow2 : 2 ^ (L + 1) = 2 * 2 ^ L := by
+    simp [Nat.pow_succ, Nat.mul_comm]
+  have hmod1 : e1 % ord = exp := by
+    dsimp only [e1]
+    rw [Nat.add_mod_right]
+    exact Nat.mod_eq_of_lt hexp
+  have hmod2 : e2 % ord = exp := by
+    dsimp only [e2]
+    rw [Nat.add_mod_right]
+    exact hmod1
+  dsimp only [padded]
+  split
+  · refine ⟨by assumption, ?_, hmod1⟩
+    omega
+  · refine ⟨?_, ?_, hmod2⟩
+    · omega
+    · omega
+
 end PMSet

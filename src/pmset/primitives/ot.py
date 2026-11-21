@@ -106,17 +106,33 @@ class ChouOrlandiOT(ObliviousTransfer):
         ).digest()
 
     def receiver_choose(self, choices: Sequence[int]) -> tuple[list[bytes], list[bytes]]:
+        from pmset.native import ct_p256_ot_choose, ct_select_bytes
+
         wire_B: list[bytes] = []
         keys: list[bytes] = []
         for idx, c in enumerate(choices):
             if c not in (0, 1):
                 raise ValueError(f"OT choice bit must be 0 or 1, got {c}")
             b = random_scalar()
-            bG = scalar_mul(b, P256_GENERATOR)
-            B = bG if c == 0 else point_add(self.A, bG)
-            B_bytes = B.to_compressed_bytes()
-            shared = scalar_mul(b, self.A)
-            key = self._derive_key(idx, B_bytes, shared)
+            native_res = ct_p256_ot_choose(self.A_bytes, b, c)
+            if native_res is not None:
+                B_bytes, shared_bytes = native_res
+                key = hashlib.sha256(
+                    self.DOMAIN
+                    + idx.to_bytes(4, "big")
+                    + self.A_bytes
+                    + B_bytes
+                    + shared_bytes
+                ).digest()
+            else:
+                # Branchless fallback: always compute BOTH bG and A + bG, then ct_select_bytes
+                bG = scalar_mul(b, P256_GENERATOR)
+                A_plus_bG = point_add(self.A, bG)
+                B_bytes = ct_select_bytes(
+                    bG.to_compressed_bytes(), A_plus_bG.to_compressed_bytes(), c
+                )
+                shared = scalar_mul(b, self.A)
+                key = self._derive_key(idx, B_bytes, shared)
             wire_B.append(B_bytes)
             keys.append(key)
         return wire_B, keys
@@ -126,6 +142,8 @@ class ChouOrlandiOT(ObliviousTransfer):
         receiver_msgs: Sequence[bytes],
         message_pairs: Sequence[tuple[bytes, bytes]],
     ) -> list[tuple[bytes, bytes]]:
+        from pmset.native import ct_xor_bytes
+
         if self._a is None:
             raise ValueError("ChouOrlandiOT sender_respond requires sender_secret_a")
         if len(receiver_msgs) != len(message_pairs):
@@ -144,7 +162,7 @@ class ChouOrlandiOT(ObliviousTransfer):
             k1 = self._derive_key(idx, B_bytes, scalar_mul(self._a, point_add(B, neg_A)))
             pad0 = prg_expand(k0, len(m0), domain=b"PMSET-OT-PAD")
             pad1 = prg_expand(k1, len(m1), domain=b"PMSET-OT-PAD")
-            out.append((_xor_bytes(m0, pad0), _xor_bytes(m1, pad1)))
+            out.append((ct_xor_bytes(m0, pad0), ct_xor_bytes(m1, pad1)))
         return out
 
     def receiver_decrypt(
@@ -153,11 +171,14 @@ class ChouOrlandiOT(ObliviousTransfer):
         keys: Sequence[bytes],
         encrypted_pairs: Sequence[tuple[bytes, bytes]],
     ) -> list[bytes]:
+        from pmset.native import ct_select_bytes, ct_xor_bytes
+
         if not (len(choices) == len(keys) == len(encrypted_pairs)):
             raise ValueError("OT decrypt length mismatch")
         out: list[bytes] = []
         for c, key, (e0, e1) in zip(choices, keys, encrypted_pairs):
-            ct = e0 if c == 0 else e1
+            # Branchless constant-time selection on secret choice bit c
+            ct = ct_select_bytes(e0, e1, c)
             pad = prg_expand(key, len(ct), domain=b"PMSET-OT-PAD")
-            out.append(_xor_bytes(ct, pad))
+            out.append(ct_xor_bytes(ct, pad))
         return out

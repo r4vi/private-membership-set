@@ -16,3 +16,9 @@ wheels/
 verification/lean/.lake/
 verification/tla/states/
 *.old
+
+# Compiled native backend shared objects (built from src/pmset/_native/pmset_ct.c)
+src/pmset/_native/*.so
+src/pmset/_native/*.dylib
+src/pmset/_native/*.dll
+

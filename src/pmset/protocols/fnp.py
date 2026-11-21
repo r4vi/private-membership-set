@@ -85,12 +85,10 @@ class FNPPaillierServer(PMSetServer):
 
         pk = PaillierPublicKey(n=n)
         coeffs = polynomial_from_roots(self._roots, n)
-        # E(P(x)) = E(c_0) * prod_{i=1}^d E(x^i)^{c_i} mod n^2
+        # E(P(x)) = E(c_0) * prod_{i=1}^d E(x^i)^{c_i} mod n^2 (evaluate ALL terms uniformly)
         acc = pk.encrypt(coeffs[0])
         for i in range(1, degree + 1):
-            c_i = coeffs[i]
-            if c_i != 0:
-                acc = pk.add(acc, pk.mul_scalar(enc_powers[i - 1], c_i))
+            acc = pk.add(acc, pk.mul_scalar(enc_powers[i - 1], coeffs[i]))
 
         # Mask with uniform invertible r in Z_n* and rerandomize
         r = random_coprime(n)

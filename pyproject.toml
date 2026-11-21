@@ -54,6 +54,9 @@ pmset = "pmset.cli:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/pmset"]
 
+[tool.hatch.build.hooks.custom]
+path = "hatch_build.py"
+
 [tool.pytest.ini_options]
 testpaths = ["tests", "."]
 python_files = ["test_*.py"]

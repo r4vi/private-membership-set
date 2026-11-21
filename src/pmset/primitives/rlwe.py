@@ -93,21 +93,21 @@ def poly_neg(a: Sequence[int], q: int) -> list[int]:
 
 
 def poly_mul_negacyclic(a: Sequence[int], b: Sequence[int], q: int) -> list[int]:
-    """Multiply polynomials in Z_q[X] / (X^N + 1) using negacyclic convolution."""
+    """Multiply polynomials in Z_q[X] / (X^N + 1) using branchless negacyclic convolution."""
+    from pmset.native import ct_rlwe_poly_mul
+
+    native_out = ct_rlwe_poly_mul(a, b, q)
+    if native_out is not None:
+        return native_out
     n = len(a)
     res = [0] * n
-    for i, ai in enumerate(a):
-        if ai == 0:
-            continue
-        for j, bj in enumerate(b):
-            if bj == 0:
-                continue
-            idx = i + j
-            prod = ai * bj
-            if idx < n:
-                res[idx] += prod
-            else:
-                res[idx - n] -= prod
+    for i in range(n):
+        ai = a[i]
+        split = n - i
+        for j in range(split):
+            res[i + j] += ai * b[j]
+        for j in range(split, n):
+            res[i + j - n] -= ai * b[j]
     return [c % q for c in res]
 
 
@@ -163,7 +163,9 @@ class RLWEContext:
         return ctx
 
     def encrypt_poly(self, plaintext_poly: Sequence[int]) -> RLWECiphertext:
-        """Encrypt a plaintext polynomial m in R_t."""
+        """Encrypt a plaintext polynomial m in R_t in constant time."""
+        from pmset.native import ct_rlwe_encrypt
+
         if self.secret_key is None:
             raise ValueError("Cannot encrypt without secret key")
         p = self.params
@@ -171,6 +173,9 @@ class RLWEContext:
             raise ValueError(f"Expected polynomial of length {p.n}, got {len(plaintext_poly)}")
         a = _sample_uniform(p.n, p.q)
         e = _sample_cbd(p.n, p.noise_eta)
+        b_native = ct_rlwe_encrypt(a, self.secret_key, e, plaintext_poly, p.q, p.t)
+        if b_native is not None:
+            return RLWECiphertext(a=a, b=b_native)
         as_prod = poly_mul_negacyclic(a, self.secret_key, p.q)
         delta = p.delta
         b = [
@@ -185,13 +190,17 @@ class RLWEContext:
         return self.encrypt_poly(poly)
 
     def decrypt_poly(self, ct: RLWECiphertext) -> list[int]:
-        """Decrypt ciphertext (a, b) back into plaintext polynomial in R_t."""
+        """Decrypt ciphertext (a, b) back into plaintext polynomial in R_t in constant time."""
+        from pmset.native import ct_rlwe_decrypt
+
         if self.secret_key is None:
             raise ValueError("Cannot decrypt without secret key")
         p = self.params
+        m_native = ct_rlwe_decrypt(ct.a, ct.b, self.secret_key, p.q, p.t)
+        if m_native is not None:
+            return m_native
         as_prod = poly_mul_negacyclic(ct.a, self.secret_key, p.q)
         noisy = [(ct.b[i] + as_prod[i]) % p.q for i in range(p.n)]
-        # Nearest integer rounding: round(t * v / q) mod t == ((2*t*v + q) // (2*q)) % t
         two_q = 2 * p.q
         return [((2 * p.t * v + p.q) // two_q) % p.t for v in noisy]
 

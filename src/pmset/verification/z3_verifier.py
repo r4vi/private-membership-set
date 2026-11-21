@@ -603,6 +603,82 @@ def _z3_shamir_pir_proofs(prime: int = 13, num_buckets: int = 4) -> list[Propert
     ]
 
 
+def _z3_constant_time_gadget_proofs() -> list[PropertyResult]:
+    """Formally prove the branchless C constant-time masking gadgets in pmset_ct.c."""
+    def _neg_ct_select() -> list["z3.BoolRef"]:
+        a, b, sel = z3.BitVecs("a b sel", 8)
+        one = z3.BitVecVal(1, 8)
+        mask = -(sel & one)
+        res = (a & (~mask)) | (b & mask)
+        expected = z3.If((sel & one) == one, b, a)
+        return [res != expected]
+
+    def _neg_ct_cond_xor() -> list["z3.BoolRef"]:
+        acc, src, cond = z3.BitVecs("acc src cond", 8)
+        one = z3.BitVecVal(1, 8)
+        mask = -(cond & one)
+        res = acc ^ (src & mask)
+        expected = z3.If((cond & one) == one, acc ^ src, acc)
+        return [res != expected]
+
+    def _neg_ct_is_zero() -> list["z3.BoolRef"]:
+        x = z3.BitVec("x", 32)
+        nz = z3.LShR(x | (-x), 31)
+        res = z3.BitVecVal(1, 32) - (nz & z3.BitVecVal(1, 32))
+        expected = z3.If(x == z3.BitVecVal(0, 32), z3.BitVecVal(1, 32), z3.BitVecVal(0, 32))
+        return [res != expected]
+
+    def _neg_joye_padding() -> list["z3.BoolRef"]:
+        # For any L >= 1 (tested symbolically for concrete L=16 -> 2^15 <= ord < 2^16),
+        # and any 0 <= exp < ord, Joye padding produces exact bit-length L+1 and == exp mod ord.
+        two_L_minus_1 = 1 << 15
+        two_L = 1 << 16
+        two_L_plus_1 = 1 << 17
+        order, exp = z3.Ints("order exp")
+        e1 = exp + order
+        e2 = e1 + order
+        padded = z3.If(e1 >= two_L, e1, e2)
+        ok = z3.And(
+            padded >= two_L,
+            padded < two_L_plus_1,
+            (padded - exp) % order == 0,
+        )
+        return [
+            order >= two_L_minus_1,
+            order < two_L,
+            exp >= 0,
+            exp < order,
+            z3.Not(ok),
+        ]
+
+    return [
+        _prove_unsat(
+            "ct_select_bytes_branchless_exact",
+            "constant_time",
+            _neg_ct_select,
+            "Branchless mask (a & ~-(sel&1)) | (b & -(sel&1)) == select(a, b, sel) for all 8-bit values",
+        ),
+        _prove_unsat(
+            "ct_cond_xor_branchless_exact",
+            "constant_time",
+            _neg_ct_cond_xor,
+            "Branchless acc ^ (src & -(cond&1)) == cond_xor(acc, src, cond) for all 8-bit values",
+        ),
+        _prove_unsat(
+            "ct_is_zero_u32_branchless_exact",
+            "constant_time",
+            _neg_ct_is_zero,
+            "Branchless 1 - ((x | -x) >>> 31) == (x == 0) for all 32-bit integers",
+        ),
+        _prove_unsat(
+            "ct_joye_exponent_padding_fixed_bitlen",
+            "constant_time",
+            _neg_joye_padding,
+            "Joye padding guarantees exact bit-length L+1 and e_padded == exp (mod order) for all 0 <= exp < order",
+        ),
+    ]
+
+
 class Z3Verifier(FormalVerifier):
     """Formal SMT verifier backed by Z3 covering every registered PMSet protocol."""
 
@@ -632,6 +708,7 @@ class Z3Verifier(FormalVerifier):
         t0 = time.perf_counter()
         name = protocol.name
         props: list[PropertyResult] = []
+        props.extend(_z3_constant_time_gadget_proofs())
 
         if name in ("dh_oprf_paillier_pir", "ecdh_oprf_paillier_pir"):
             props.append(_z3_prime_group_oprf_correctness())

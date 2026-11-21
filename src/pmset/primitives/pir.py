@@ -134,8 +134,7 @@ class PaillierLinearPIR(SingleServerPIR):
             acc = 1  # E(0) with r=1
             for i in range(num_buckets):
                 val = encoded[i][j]
-                if val != 0:
-                    acc = pk.add(acc, pk.mul_scalar(vec[i], val))
+                acc = pk.add(acc, pk.mul_scalar(vec[i], val))
             response_chunks.append(acc)
         return {
             "chunks": response_chunks,
@@ -225,8 +224,7 @@ class Paillier2DPIR(SingleServerPIR):
                 acc = 1
                 for r in range(rows):
                     val = encoded[r * cols + c][j]
-                    if val != 0:
-                        acc = pk.add(acc, pk.mul_scalar(row_vec[r], val))
+                    acc = pk.add(acc, pk.mul_scalar(row_vec[r], val))
                 col_chunks.append(acc)
             selected_row.append(col_chunks)
         return {
@@ -252,7 +250,7 @@ class RLWEPIR(SingleServerPIR):
     Each bucket is packed into ceil(bucket_len / N) plaintext polynomials in R_t
     (t = 256 => N bytes per polynomial). The client sends B encrypted constant
     indicator polynomials Enc(1[i == alpha]), and the server evaluates the
-    homomorphic negacyclic polynomial inner product for each chunk.
+    homomorphic negacyclic polynomial inner product in branchless C.
     """
 
     def __init__(self, params: RLWEParams | None = None) -> None:
@@ -287,6 +285,8 @@ class RLWEPIR(SingleServerPIR):
     def server_answer(
         self, buckets: Sequence[bytes], query: dict[str, Any]
     ) -> dict[str, Any]:
+        from pmset.native import ct_rlwe_pir_dot
+
         num_buckets = len(buckets)
         cts_raw = query["ciphertexts"]
         if len(cts_raw) != num_buckets:
@@ -299,13 +299,20 @@ class RLWEPIR(SingleServerPIR):
         encoded_buckets = [evaluator.encode_bytes_to_polys(b) for b in buckets]
         num_chunks = len(encoded_buckets[0]) if encoded_buckets else 0
 
+        ct_a_list = [ct.a for ct in cts]
+        ct_b_list = [ct.b for ct in cts]
         resp_chunks: list[tuple[list[int], list[int]]] = []
         for j in range(num_chunks):
-            acc = evaluator.zero_ciphertext()
-            for i in range(num_buckets):
-                term = evaluator.mul_plaintext_poly(cts[i], encoded_buckets[i][j])
-                acc = evaluator.add(acc, term)
-            resp_chunks.append(acc.to_wire())
+            pt_list = [encoded_buckets[i][j] for i in range(num_buckets)]
+            native_dot = ct_rlwe_pir_dot(ct_a_list, ct_b_list, pt_list, params.q)
+            if native_dot is not None:
+                resp_chunks.append(native_dot)
+            else:
+                acc = evaluator.zero_ciphertext()
+                for i in range(num_buckets):
+                    term = evaluator.mul_plaintext_poly(cts[i], pt_list[i])
+                    acc = evaluator.add(acc, term)
+                resp_chunks.append(acc.to_wire())
         return {"chunks": resp_chunks}
 
     def client_extract(
@@ -428,31 +435,30 @@ def dpf_gen(alpha: int, depth: int) -> tuple[DPFKey, DPFKey]:
     cw_tl: list[int] = []
     cw_tr: list[int] = []
 
+    from pmset.native import ct_cond_xor_bytes, ct_select_bytes, ct_xor_bytes
+
     for level in range(depth):
         alpha_bit = (alpha >> (depth - 1 - level)) & 1
         s0L, t0L, s0R, t0R = _dpf_prg(s0)
         s1L, t1L, s1R, t1R = _dpf_prg(s1)
 
-        if alpha_bit == 0:
-            # Keep Left, Lose Right
-            s_cw = _xor_bytes(s0R, s1R)
-            t_cw_L = t0L ^ t1L ^ 1
-            t_cw_R = t0R ^ t1R
-            # Advance along kept Left branch
-            s0 = _xor_bytes(s0L, s_cw) if t0 else s0L
-            s1 = _xor_bytes(s1L, s_cw) if t1 else s1L
-            t0 = t0L ^ (t0 & t_cw_L)
-            t1 = t1L ^ (t1 & t_cw_L)
-        else:
-            # Keep Right, Lose Left
-            s_cw = _xor_bytes(s0L, s1L)
-            t_cw_L = t0L ^ t1L
-            t_cw_R = t0R ^ t1R ^ 1
-            # Advance along kept Right branch
-            s0 = _xor_bytes(s0R, s_cw) if t0 else s0R
-            s1 = _xor_bytes(s1R, s_cw) if t1 else s1R
-            t0 = t0R ^ (t0 & t_cw_R)
-            t1 = t1R ^ (t1 & t_cw_R)
+        # Branchless Keep/Lose selection on secret alpha_bit (ZERO if alpha_bit == 0 branch!)
+        s0_keep = ct_select_bytes(s0L, s0R, alpha_bit)
+        s1_keep = ct_select_bytes(s1L, s1R, alpha_bit)
+        s0_lose = ct_select_bytes(s0R, s0L, alpha_bit)
+        s1_lose = ct_select_bytes(s1R, s1L, alpha_bit)
+        s_cw = ct_xor_bytes(s0_lose, s1_lose)
+
+        t_cw_L = t0L ^ t1L ^ alpha_bit ^ 1
+        t_cw_R = t0R ^ t1R ^ alpha_bit
+        t0_keep = (t0L & (alpha_bit ^ 1)) | (t0R & alpha_bit)
+        t1_keep = (t1L & (alpha_bit ^ 1)) | (t1R & alpha_bit)
+        t_cw_keep = (t_cw_L & (alpha_bit ^ 1)) | (t_cw_R & alpha_bit)
+
+        s0 = ct_cond_xor_bytes(s0_keep, s_cw, t0)
+        s1 = ct_cond_xor_bytes(s1_keep, s_cw, t1)
+        t0 = t0_keep ^ (t0 & t_cw_keep)
+        t1 = t1_keep ^ (t1 & t_cw_keep)
 
         cw_seeds.append(s_cw)
         cw_tl.append(t_cw_L)
@@ -469,11 +475,11 @@ def dpf_gen(alpha: int, depth: int) -> tuple[DPFKey, DPFKey]:
 
 
 def dpf_eval_full(key: DPFKey, limit: int | None = None) -> list[int]:
-    """Evaluate a DPF key over the full binary tree in O(2^depth) PRG calls."""
+    """Evaluate a DPF key over the full binary tree in O(2^depth) PRG calls (branchless CW apply)."""
+    from pmset.native import ct_cond_xor_bytes
+
     domain = 1 << key.depth
     cap = domain if limit is None else min(domain, limit)
-
-    # Recursive traversal avoids recomputing shared prefixes (exact 2^depth - 1 PRG calls)
     out = [0] * cap
 
     def _walk(level: int, prefix: int, seed: bytes, t: int) -> None:
@@ -484,12 +490,12 @@ def dpf_eval_full(key: DPFKey, limit: int | None = None) -> list[int]:
             out[prefix] = (seed[0] & 1) ^ (t & key.cw_final)
             return
         sL, tL, sR, tR = _dpf_prg(seed)
-        if t:
-            s_cw = key.cw_seeds[level]
-            sL = _xor_bytes(sL, s_cw)
-            sR = _xor_bytes(sR, s_cw)
-            tL ^= key.cw_tl[level]
-            tR ^= key.cw_tr[level]
+        s_cw = key.cw_seeds[level]
+        # Branchless correction word application on control bit t
+        sL = ct_cond_xor_bytes(sL, s_cw, t)
+        sR = ct_cond_xor_bytes(sR, s_cw, t)
+        tL ^= t & key.cw_tl[level]
+        tR ^= t & key.cw_tr[level]
         half = subtree_size >> 1
         _walk(level + 1, prefix, sL, tL)
         if prefix + half < cap:
@@ -525,17 +531,13 @@ class TwoServerDPFPIR(MultiServerPIR):
     def server_answer(
         self, server_id: int, buckets: Sequence[bytes], query: dict[str, Any]
     ) -> dict[str, Any]:
+        from pmset.native import ct_dpf_bucket_eval
+
         key = DPFKey.from_dict(query["dpf_key"])
         if key.party_id != server_id:
             raise ValueError(f"DPF key party_id={key.party_id} sent to server {server_id}")
         bits = dpf_eval_full(key, limit=len(buckets))
-        bucket_len = len(buckets[0]) if buckets else 0
-        acc = bytearray(bucket_len)
-        for bit, bucket in zip(bits, buckets):
-            if bit:
-                for i in range(bucket_len):
-                    acc[i] ^= bucket[i]
-        return {"share": bytes(acc)}
+        return {"share": ct_dpf_bucket_eval(buckets, bits)}
 
     def client_combine(
         self,
@@ -543,9 +545,11 @@ class TwoServerDPFPIR(MultiServerPIR):
         client_state: Any,
         bucket_byte_len: int,
     ) -> bytes:
+        from pmset.native import ct_xor_bytes
+
         s0 = bytes(responses[0]["share"])
         s1 = bytes(responses[1]["share"])
-        return _xor_bytes(s0, s1)[:bucket_byte_len]
+        return ct_xor_bytes(s0, s1)[:bucket_byte_len]
 
 
 # 257-bit prime > 2^256 for chunking 32-byte blocks in Shamir IT-PIR

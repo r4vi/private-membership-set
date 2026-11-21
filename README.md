@@ -110,39 +110,62 @@ pmset verify --backend all
 
 ---
 
-## Installation & Usage
+## Constant-Time Native Backend (`pmset.native`)
+
+To eliminate Python's variable-time big-integer side channels, `pmset` ships a compiled C11 + OpenSSL `libcrypto` constant-time backend ([`pmset_ct.c`](src/pmset/_native/pmset_ct.c)) automatically built via [`hatch_build.py`](hatch_build.py) and loaded by [`pmset.native`](src/pmset/native.py):
+
+- **NIST P-256 (ECDH-OPRF, Exponential ElGamal, Chou-Orlandi OT)**: OpenSSL `NID_X9_62_prime256v1` (NISTZ256 constant-time assembly) with `BN_FLG_CONSTTIME` scalars and `BN_clear_free` / `OPENSSL_cleanse` wiping.
+- **Modular Exponentiation & Inversion (DH-OPRF, RSA-OPRF, Paillier, FNP04)**: OpenSSL `BN_mod_exp_mont_consttime` + **Joye constant-bit-length exponent padding** (`BN_consttime_swap`, formally verified in both Z3 and Lean 4 `PMSet.joye_constant_bitlen_padding`) so even `exp = 1` and `exp = q - 1` execute the exact same Montgomery ladder length.
+- **Ring-LWE Lattice PIR (`oprf_rlwe_pir`, `cuckoo_oprf_pir`)**: Branchless fixed-width `__int128`/`uint64_t` negacyclic convolution, encryption, decryption, and PIR inner products with zero secret-dependent loop skips.
+- **Chou-Orlandi OT, 2-Server DPF/FSS, ElGamal Zero-Test & Bucket Lookup**: Branchless bitwise selection (`pmset_ct_select_bytes`), branchless conditional XOR (`pmset_ct_cond_xor_bytes`, `pmset_ct_dpf_bucket_eval`), non-short-circuiting ElGamal zero testing (`pmset_ct_p256_elgamal_any_zero`), and constant-time full-scan bucket tag lookup (`pmset_ct_bucket_scan_tag`).
+- **Fail-Closed Production Mode**: Set `PMSET_REQUIRE_NATIVE=1` or call `pmset.require_constant_time(True)` to raise `NativeBackendError` if the native shared library is unavailable (preventing silent fallback to pure Python).
+- **Empirical Timing Tests**: `tests/test_constant_time.py` runs differential equivalence tests plus dudect-style interleaved timing invariance checks across P-256 scalars, Joye-padded modexp, OT choice bits, RLWE zero vs dense polynomials, DPF bits, and bucket scan positions.
 
 ```bash
-# Install package with cryptographic acceleration (AES-GCM) and Z3 verifier
+# Inspect active constant-time native backend
+pmset backend
+
+# Enforce fail-closed constant-time native execution
+PMSET_REQUIRE_NATIVE=1 pmset benchmark --size 16
+```
+
+### Installation & Usage
+
+```bash
+# Install package (compiles libpmset_ct automatically via hatch_build.py; requires gcc/clang + OpenSSL libcrypto)
 uv pip install -e ".[dev]"
 
-# Explore protocols, run live demos, and benchmark all 12 implementations
+# Explore protocols, inspect backend, run demos, and benchmark all 12 implementations
 pmset list
+pmset backend
 pmset demo -p oprf_rlwe_pir
 pmset benchmark --size 16
 
-# Run the full test & formal verification suite
-pytest
+# Run the full test, constant-time timing, and formal verification suite
+PMSET_REQUIRE_NATIVE=1 pytest
 ```
 
 ### Backward Compatibility
 
-The legacy `private_membership.py` module (`PSMServer`, `PSMClient`, `DHOPRF`, `Paillier`, `is_prime`, `OPRF_PRIME`) is preserved as a thin facade backed by `pmset`'s CSPRNG primitives so existing scripts and tests continue working unchanged.
+The legacy `private_membership.py` module (`PSMServer`, `PSMClient`, `DHOPRF`, `Paillier`, `is_prime`, `OPRF_PRIME`) is preserved as a thin facade backed by `pmset`'s CSPRNG and constant-time primitives so existing scripts and tests continue working unchanged.
 
 ---
 
-## Security Disclaimer
+### Residual Python Runtime Considerations
 
-While `pmset` upgrades every cryptographic primitive from the original educational toy (using `secrets` CSPRNG, NIST P-256 prime-order groups, safe-prime prime-order subgroups, AES-256-GCM AEAD, Ring-LWE noise-budget enforcement, and formal verification), Python's arbitrary-precision integer arithmetic is **not constant-time** and therefore cannot defend against local timing side-channel attacks. For production deployment with strict side-channel resistance, pair the protocol interfaces with constant-time native backends.
+All secret-dependent cryptographic arithmetic and branching executes inside compiled native C / OpenSSL assembly (`libpmset_ct`) with transient secrets wiped via `BN_clear_free`/`OPENSSL_cleanse`. High-level protocol framing (Python object allocation, wire serialization, and garbage collection) still runs in the CPython interpreter; deployments requiring hard memory-isolation or zero-copy secret lifetime guarantees across the outer network framing layer should also audit process-level isolation (e.g., dedicated worker processes / enclaves).
 
 ## References
 
-- Google Private Membership (PSM-RLWE): https://github.com/google/private-membership
-- Freedman, Nissim, Pinkas — *Efficient Private Matching and Set Intersection* (EUROCRYPT 2004)
-- Dong, Chen, Wen — *When Private Set Intersection Meets Big Data* (ACM CCS 2013)
-- Pinkas, Schneider, Zohner — *Faster Private Set Intersection Based on OT Extension* (USENIX Security 2014)
-- Chou, Orlandi — *The Simplest Protocol for Oblivious Transfer* (LATINCRYPT 2015)
-- Boyle, Gilboa, Ishai — *Function Secret Sharing* (EUROCRYPT 2015 / CCS 2016)
-- Chor, Goldreich, Kushilevitz, Sudan — *Private Information Retrieval* (FOCS 1995)
-- RFC 9497 — *Oblivious Pseudorandom Functions (OPRFs) Using Prime-Order Groups*
-- RFC 9474 — *RSA Blind Signatures*
+- [Google Private Membership (PSM-RLWE)](https://github.com/google/private-membership)
+- Freedman, Nissim, Pinkas — [*Efficient Private Matching and Set Intersection* (EUROCRYPT 2004)](https://link.springer.com/chapter/10.1007/978-3-540-24676-3_1) ([PDF](https://www.pinkas.net/PAPERS/FNP04.pdf))
+- Dong, Chen, Wen — [*When Private Set Intersection Meets Big Data* (ACM CCS 2013)](https://eprint.iacr.org/2013/515)
+- Pinkas, Schneider, Zohner — [*Faster Private Set Intersection Based on OT Extension* (USENIX Security 2014)](https://www.usenix.org/system/files/conference/usenixsecurity14/sec14-paper-pinkas.pdf)
+- Chou, Orlandi — [*The Simplest Protocol for Oblivious Transfer* (LATINCRYPT 2015)](https://eprint.iacr.org/2015/267)
+- Boyle, Gilboa, Ishai — [*Function Secret Sharing: Improvements and Extensions* (EUROCRYPT 2015 / CCS 2016)](https://eprint.iacr.org/2018/707)
+- Chor, Goldreich, Kushilevitz, Sudan — [*Private Information Retrieval* (FOCS 1995 / JACM 1998)](https://people.csail.mit.edu/madhu/papers/1995/pir-journ.pdf)
+- Chen, Laine, Rindal — [*Fast Private Set Intersection from Homomorphic Encryption* (ACM CCS 2017)](https://eprint.iacr.org/2017/677)
+- [RFC 9497 — *Oblivious Pseudorandom Functions (OPRFs) Using Prime-Order Groups*](https://www.rfc-editor.org/rfc/rfc9497)
+- [RFC 9474 — *RSA Blind Signatures*](https://www.rfc-editor.org/rfc/rfc9474)
+- Facebook Engineering — [*Homomorphic Hashing*](https://engineering.fb.com/2019/03/01/security/homomorphic-hashing/)
+

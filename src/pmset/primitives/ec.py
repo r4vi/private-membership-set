@@ -153,21 +153,32 @@ def _jac_to_affine(X: int, Y: int, Z: int) -> ECPoint:
 
 
 def point_add(P: ECPoint, Q: ECPoint) -> ECPoint:
-    """Add two affine points on P-256."""
+    """Add two affine points on P-256 (uses OpenSSL NISTZ256 when available)."""
     if P.is_infinity:
         return Q
     if Q.is_infinity:
         return P
+    from pmset.native import ct_p256_point_add
+
+    native_out = ct_p256_point_add(P.to_compressed_bytes(), Q.to_compressed_bytes())
+    if native_out is not None:
+        return ECPoint.from_compressed_bytes(native_out)
     assert P.x is not None and P.y is not None and Q.x is not None and Q.y is not None
     X3, Y3, Z3 = _jac_add(P.x, P.y, 1, Q.x, Q.y, 1)
     return _jac_to_affine(X3, Y3, Z3)
 
 
 def scalar_mul(k: int, P: ECPoint) -> ECPoint:
-    """Compute k * P on P-256 using binary double-and-add in Jacobian coordinates."""
+    """Compute k * P on P-256 in constant time via OpenSSL NISTZ256 assembly when available."""
     k = k % P256_N
     if k == 0 or P.is_infinity:
         return P256_INFINITY
+    from pmset.native import ct_p256_scalar_mul
+
+    pt_bytes = None if P == P256_GENERATOR else P.to_compressed_bytes()
+    native_out = ct_p256_scalar_mul(k, pt_bytes, P256_N)
+    if native_out is not None:
+        return ECPoint.from_compressed_bytes(native_out)
     assert P.x is not None and P.y is not None
     RX, RY, RZ = 0, 1, 0
     QX, QY, QZ = P.x, P.y, 1

@@ -127,7 +127,8 @@ class _ElGamalEqualitySession(PMSetSession):
         if self._stage != "awaiting_resp" or response.phase != "elgamal_eq_response":
             raise ValueError(f"Unexpected response in stage '{self._stage}'")
         cts = [ElGamalCiphertext.from_wire(w) for w in response.payload["ciphertexts"]]
-        found = any(self._he.is_zero(ct) for ct in cts)
+        # Non-short-circuiting constant-time zero test across all ciphertexts
+        found = self._he.any_zero(cts)
         self._result = QueryResult(is_member=found, payload=None)
         self._stage = "done"
 
