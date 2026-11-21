@@ -1,0 +1,75 @@
+"""Core abstractions and execution engine for pmset."""
+
+from pmset.core.interfaces import (
+    MultiServerPMSetServer,
+    PMSetClient,
+    PMSetProtocol,
+    PMSetServer,
+    PMSetServerReplica,
+    PMSetSession,
+)
+from pmset.core.registry import (
+    ProtocolRegistry,
+    all_protocols,
+    get_protocol,
+    list_protocols,
+    protocol_catalog,
+    register_protocol,
+)
+from pmset.core.runner import (
+    TranscriptEntry,
+    TranscriptRecorder,
+    execute_batch_query,
+    execute_query,
+)
+from pmset.core.serialization import SerializationError, decode_value, encode_value
+from pmset.core.types import (
+    BatchQueryResult,
+    CommunicationStats,
+    ComplexityProfile,
+    DatasetInput,
+    Item,
+    ProtocolCapabilities,
+    ProtocolMessage,
+    ProtocolMetadata,
+    PublicParams,
+    QueryResult,
+    SecurityModel,
+    normalize_dataset,
+    normalize_item,
+)
+
+__all__ = [
+    "BatchQueryResult",
+    "CommunicationStats",
+    "ComplexityProfile",
+    "DatasetInput",
+    "Item",
+    "MultiServerPMSetServer",
+    "PMSetClient",
+    "PMSetProtocol",
+    "PMSetServer",
+    "PMSetServerReplica",
+    "PMSetSession",
+    "ProtocolCapabilities",
+    "ProtocolMessage",
+    "ProtocolMetadata",
+    "ProtocolRegistry",
+    "PublicParams",
+    "QueryResult",
+    "SecurityModel",
+    "SerializationError",
+    "TranscriptEntry",
+    "TranscriptRecorder",
+    "all_protocols",
+    "decode_value",
+    "encode_value",
+    "execute_batch_query",
+    "execute_query",
+    "get_protocol",
+    "list_protocols",
+    "normalize_dataset",
+    "normalize_item",
+    "protocol_catalog",
+    "register_protocol",
+]

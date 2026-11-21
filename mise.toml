@@ -1,7 +1,13 @@
 [tools]
-python = "3.14"
+python = "3.12"
 uv = "latest"
 
 [tasks]
 test = "uv run pytest"
-run = "uv run python private_membership.py"
+demo = "uv run pmset demo"
+list = "uv run pmset list"
+benchmark = "uv run pmset benchmark --size 16"
+verify-z3 = "uv run pmset verify --backend z3"
+verify-tla = "uv run pmset verify --backend tla"
+verify-lean = "uv run pmset verify --backend lean"
+verify-all = "uv run pmset verify --backend all"

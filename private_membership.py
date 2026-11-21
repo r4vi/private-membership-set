@@ -1,259 +1,139 @@
+"""Backward-compatibility facade for the original ``private_membership.py`` API.
+
+New code should import from :mod:`pmset` directly, which provides the canonical
+generic :class:`pmset.PMSetProtocol` interface, 12 concrete cryptographic
+implementations, and formal verification in Z3, TLA+, and Lean 4.
+"""
+
+from __future__ import annotations
+
 import hashlib
-import random
 import math
+import secrets
 
-"""
-Pure Python Implementation of Private Set Membership (PSM).
-Inspired by https://github.com/google/private-membership.
+from pmset.primitives.he import PaillierHE
+from pmset.primitives.math_utils import (
+    LEGACY_OPRF_PRIME as OPRF_PRIME,
+    generate_prime as get_prime,
+    is_prime as _pmset_is_prime,
+    lcm,
+    random_coprime,
+    random_int_range,
+)
 
-Goal: Readability and learning.
-Performance: Not optimized (uses pure Python and Paillier HE).
 
-The protocol follows these main phases:
-1. OPRF (Oblivious Pseudo-Random Function):
-   Client gets a hash of their element signed by the server's key,
-   without the server seeing the element and without the client seeing the key.
-2. Bucketization:
-   The server's set is divided into buckets based on the prefix of the OPRF hash.
-3. PIR (Private Information Retrieval):
-   The client fetches the target bucket without the server knowing which bucket was fetched.
-"""
+def is_prime(n: int, k: int = 40) -> bool:
+    """Miller-Rabin primality test backed by :func:`pmset.primitives.math_utils.is_prime`."""
+    return _pmset_is_prime(n, rounds=k)
 
-# --- Constants ---
-# Using a fixed 256-bit prime for the OPRF group.
-# In production, use a large safe prime (e.g. from RFC 3526).
-OPRF_PRIME = 2**256 - 189
-
-# --- Math Utilities ---
-
-def is_prime(n, k=5):
-    """Miller-Rabin probabilistic primality test.
-
-    Deterministically correct for n < 1369 (trial division by small primes);
-    for larger n the error probability is at most 4^-k.
-    Note: the previous version was Fermat's test, which accepts Carmichael
-    numbers whenever the random bases are all coprime to n.
-    """
-    if n < 2:
-        return False
-    small_primes = (2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37)
-    for sp in small_primes:
-        if n == sp:
-            return True
-        if n % sp == 0:
-            return False
-
-    # Write n - 1 = d * 2^s with d odd
-    d = n - 1
-    s = 0
-    while d % 2 == 0:
-        d //= 2
-        s += 1
-
-    for _ in range(k):
-        a = random.randint(2, n - 2)
-        x = pow(a, d, n)
-        if x == 1 or x == n - 1:
-            continue
-        for _ in range(s - 1):
-            x = (x * x) % n
-            if x == n - 1:
-                break
-        else:
-            return False
-    return True
-
-def get_prime(bits):
-    """Generate a random prime with the specified number of bits."""
-    while True:
-        p = random.getrandbits(bits)
-        if p % 2 != 0 and is_prime(p):
-            return p
-
-def lcm(a, b):
-    return abs(a * b) // math.gcd(a, b)
-
-# --- OPRF (Oblivious Pseudo-Random Function) ---
-# Implements a Diffie-Hellman based OPRF.
-# This corresponds to the commutative cipher part of Google's PSM.
 
 class DHOPRF:
-    def __init__(self, p=OPRF_PRIME):
-        # The blinding/unblinding math relies on Fermat's little theorem, so p
-        # must be an odd prime. A composite p would silently produce wrong
-        # hashes instead of failing.
+    """Legacy Z_p* DH-OPRF compatibility wrapper (see :class:`pmset.primitives.oprf.DHOPRF`)."""
+
+    def __init__(self, p: int = OPRF_PRIME) -> None:
         if p < 3 or p % 2 == 0 or not is_prime(p):
             raise ValueError(f"DHOPRF requires an odd prime modulus, got p={p}")
         self.p = p
 
-    def hash_to_group(self, x):
-        """Map a string x to an element in the multiplicative group Zp*."""
+    def hash_to_group(self, x: str) -> int:
         h = hashlib.sha256(x.encode()).digest()
-        # Ensure it's not 0 by adding 1 if necessary
-        return (int.from_bytes(h, 'big') % (self.p - 1)) + 1
+        return (int.from_bytes(h, "big") % (self.p - 1)) + 1
 
-    def client_blind(self, x):
-        """Step 1: Client blinds the element with a random factor r."""
-        while True:
-            r = random.randint(2, self.p - 2)
-            if math.gcd(r, self.p - 1) == 1:
-                break
+    def client_blind(self, x: str) -> tuple[int, int]:
+        r = random_coprime(self.p - 1)
         h_x = self.hash_to_group(x)
-        blinded = pow(h_x, r, self.p)
-        return blinded, r
+        return pow(h_x, r, self.p), r
 
-    def server_sign(self, blinded_x, k):
-        """Step 2: Server signs the blinded element with its secret key k."""
+    def server_sign(self, blinded_x: int, k: int) -> int:
         return pow(blinded_x, k, self.p)
 
-    def client_unblind(self, signed_blinded_x, r):
-        """Step 3: Client removes the blinding factor to get H(x)^k."""
+    def client_unblind(self, signed_blinded_x: int, r: int) -> int:
         r_inv = pow(r, -1, self.p - 1)
         return pow(signed_blinded_x, r_inv, self.p)
 
-    def server_compute_hash(self, x, k):
-        """Server-side direct computation for its own set of items."""
-        h_x = self.hash_to_group(x)
-        return pow(h_x, k, self.p)
+    def server_compute_hash(self, x: str, k: int) -> int:
+        return pow(self.hash_to_group(x), k, self.p)
 
-# --- PIR (Private Information Retrieval) ---
-# Implements a Linear PIR using Paillier Homomorphic Encryption.
-# Google's library uses Ring-LWE (RLWE) based PIR for better efficiency.
-# Paillier is used here for educational clarity as it is simpler to understand.
 
-class Paillier:
-    def __init__(self, bits=1024):
-        p = get_prime(bits // 2)
-        q = get_prime(bits // 2)
-        self.n = p * q
-        self.n_sq = self.n * self.n
-        self.g = self.n + 1
-        self.phi = (p - 1) * (q - 1)
-        self.l = lcm(p - 1, q - 1)
-        # mu = (L(g^l mod n^2))^-1 mod n
-        self.mu = pow((pow(self.g, self.l, self.n_sq) - 1) // self.n, -1, self.n)
+class Paillier(PaillierHE):
+    """Legacy Paillier alias backed by :class:`pmset.primitives.he.PaillierHE`."""
 
-    def encrypt(self, m):
-        """Encrypt message m: c = g^m * r^n mod n^2."""
-        r = random.randint(2, self.n - 1)
-        while math.gcd(r, self.n) != 1:
-            r = random.randint(2, self.n - 1)
-        c = (pow(self.g, m, self.n_sq) * pow(r, self.n, self.n_sq)) % self.n_sq
-        return c
+    def __init__(self, bits: int = 1024) -> None:
+        super().__init__(bits=bits)
+        self.l = self.lam
 
-    def decrypt(self, c):
-        """Decrypt ciphertext c: m = L(c^l mod n^2) * mu mod n."""
-        return (((pow(c, self.l, self.n_sq) - 1) // self.n) * self.mu) % self.n
-
-# --- Private Set Membership (PSM) Logic ---
 
 class PSMServer:
-    def __init__(self, items, bucket_count=16):
+    """Legacy single-level DH-OPRF + Paillier linear PIR server facade."""
+
+    def __init__(self, items: list[str], bucket_count: int = 16) -> None:
         self.oprf = DHOPRF()
-        self.k = random.randint(2, self.oprf.p - 1)
+        self.k = random_int_range(2, self.oprf.p - 2)
         self.bucket_count = bucket_count
-        self.buckets = [[] for _ in range(bucket_count)]
+        self.buckets: list[list[int]] = [[] for _ in range(bucket_count)]
         self._setup(items)
 
-    def _setup(self, items):
-        """Preprocess items by OPRF-hashing them and placing them into buckets."""
+    def _setup(self, items: list[str]) -> None:
         for item in items:
             h_k = self.oprf.server_compute_hash(item, self.k)
-            # Use lower bits as bucket index (corresponds to prefix-based bucketization)
-            bucket_idx = h_k % self.bucket_count
-            self.buckets[bucket_idx].append(h_k)
+            self.buckets[h_k % self.bucket_count].append(h_k)
 
-        # Pad all buckets to the same size to prevent size-based leakage
-        max_size = max(len(b) for b in self.buckets)
+        max_size = max(1, max(len(b) for b in self.buckets))
         for b in self.buckets:
             while len(b) < max_size:
-                b.append(random.randint(2, self.oprf.p - 1))
+                b.append(random_int_range(2, self.oprf.p - 2))
 
-    def handle_oprf_request(self, blinded_element):
+    def handle_oprf_request(self, blinded_element: int) -> int:
         return self.oprf.server_sign(blinded_element, self.k)
 
-    def handle_pir_request(self, encrypted_query_vector, n):
-        """
-        Linear PIR: Compute dot product of query vector and buckets homomorphically.
-        Result is an encrypted list containing the hashes of the target bucket.
-
-        n: the client's Paillier modulus (public). Passed per-request so the
-        server never stores client state.
-        """
+    def handle_pir_request(self, encrypted_query_vector: list[int], n: int) -> list[int]:
         bucket_size = len(self.buckets[0])
-        n_sq: int = n**2
-        response = []
-
+        n_sq = n * n
+        response: list[int] = []
         for j in range(bucket_size):
-            # Homomorphic dot product: Product(E(q_i)^hash_i) = E(Sum(q_i * hash_i))
-            encrypted_sum = 1 # E(0) with r=1
+            encrypted_sum = 1
             for i in range(self.bucket_count):
                 term = pow(encrypted_query_vector[i], self.buckets[i][j], n_sq)
                 encrypted_sum = (encrypted_sum * term) % n_sq
             response.append(encrypted_sum)
         return response
 
+
 class PSMClient:
-    def __init__(self, bucket_count=16):
+    """Legacy single-level DH-OPRF + Paillier linear PIR client facade."""
+
+    def __init__(self, bucket_count: int = 16) -> None:
         self.oprf = DHOPRF()
         self.bucket_count = bucket_count
         self.pir = Paillier(bits=1024)
 
-    def query(self, server, element):
-        print(f"[*] Querying for element: '{element}'")
-
-        # The PIR query vector must be aligned with the server's bucket layout.
-        # A mismatch used to cause silent wrong answers (client with more buckets
-        # than the server) or an unhandled IndexError (client with fewer).
+    def query(self, server: PSMServer, element: str) -> bool:
         if server.bucket_count != self.bucket_count:
             raise ValueError(
                 f"Bucket count mismatch: server uses {server.bucket_count} buckets, "
                 f"client uses {self.bucket_count}. They must match for PIR to work."
             )
-
-        # --- Phase 1: OPRF ---
-        # Get the 'hardened' hash of the element without revealing the element.
-        blinded_element, r = self.oprf.client_blind(element)
-        signed_blinded = server.handle_oprf_request(blinded_element)
-        target_h_k = self.oprf.client_unblind(signed_blinded, r)
-
-        # Determine which bucket the hash *should* be in.
+        blinded, r = self.oprf.client_blind(element)
+        signed = server.handle_oprf_request(blinded)
+        target_h_k = self.oprf.client_unblind(signed, r)
         bucket_idx = target_h_k % self.bucket_count
 
-        # --- Phase 2: PIR ---
-        # Fetch the entire bucket without the server knowing which one.
-        query_vector = []
-        for i in range(self.bucket_count):
-            val = 1 if i == bucket_idx else 0
-            query_vector.append(self.pir.encrypt(val))
-
+        query_vector = [
+            self.pir.encrypt(1 if i == bucket_idx else 0)
+            for i in range(self.bucket_count)
+        ]
         encrypted_response = server.handle_pir_request(query_vector, self.pir.n)
-
-        # Decrypt the hashes in the bucket.
         retrieved_bucket = [self.pir.decrypt(c) for c in encrypted_response]
-        print(f"[-] Retrieved bucket {bucket_idx} with {len(retrieved_bucket)} items via PIR.")
+        return target_h_k in retrieved_bucket
 
-        # --- Phase 3: Membership Check ---
-        # Since we have the bucket, we check if our hash is present.
-        if target_h_k in retrieved_bucket:
-            return True
-        return False
-
-# --- Main Demonstration ---
 
 if __name__ == "__main__":
-    # Server's secret set
-    server_items = ["alice@example.com", "bob@example.com", "charlie@example.com", "dave@example.com"]
-    bucket_count = 4
+    import pmset
 
-    server = PSMServer(server_items, bucket_count=bucket_count)
-    client = PSMClient(bucket_count=bucket_count)
-
-    print(f"Server initialized with {len(server_items)} items.\n")
-
-    test_queries = ["alice@example.com", "eve@example.com", "bob@example.com", "malory@example.com"]
-
-    for q in test_queries:
-        is_member = client.query(server, q)
-        result = "MEMBER" if is_member else "NOT A MEMBER"
-        print(f"[Result] '{q}' is {result}\n")
+    proto = pmset.get_protocol("oprf_rlwe_pir")
+    items = ["alice@example.com", "bob@example.com", "charlie@example.com", "dave@example.com"]
+    server = proto.create_server(items)
+    client = proto.create_client(server.public_params())
+    for q in ["alice@example.com", "eve@example.com", "bob@example.com", "malory@example.com"]:
+        res = client.query_detailed(server, q, verify_wire_roundtrip=True)
+        print(f"[{proto.name}] '{q}' -> {'MEMBER' if res.is_member else 'NOT A MEMBER'}")

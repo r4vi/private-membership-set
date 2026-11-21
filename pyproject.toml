@@ -1,13 +1,60 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
 [project]
-name = "private-membership-set"
-version = "0.1.0"
-description = "Pure Python implementation of Private Set Membership (PSM) protocol for educational purposes"
-requires-python = ">=3.14"
+name = "pmset"
+version = "1.0.0"
+description = "Canonical Python Private Set Membership (PMSet / PSM) library with unified protocol interfaces, multiple cryptographic backends, and formal verification in Z3, TLA+, and Lean 4."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+authors = [{ name = "pmset contributors" }]
+keywords = [
+    "private-set-membership",
+    "private-membership",
+    "psi",
+    "psm",
+    "pir",
+    "oprf",
+    "rlwe",
+    "homomorphic-encryption",
+    "oblivious-transfer",
+    "formal-verification",
+    "z3",
+    "tla+",
+    "lean4",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Security :: Cryptography",
+]
 dependencies = []
 
-[tool.pytest.ini_options]
-testpaths = ["."]
-python_files = ["test_*.py"]
+[project.optional-dependencies]
+crypto = ["cryptography>=42.0"]
+verify = ["z3-solver>=4.12"]
+dev = [
+    "pytest>=8.0",
+    "hypothesis>=6.100",
+    "z3-solver>=4.12",
+    "cryptography>=42.0",
+]
 
-[dependency-groups]
-dev = ["pytest>=8"]
+[project.scripts]
+pmset = "pmset.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pmset"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "."]
+python_files = ["test_*.py"]
+addopts = "-ra"

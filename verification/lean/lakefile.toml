@@ -1,0 +1,6 @@
+name = "pmset"
+version = "1.0.0"
+defaultTargets = ["PMSet"]
+
+[[lean_lib]]
+name = "PMSet"
