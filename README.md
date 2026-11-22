@@ -110,38 +110,47 @@ pmset verify --backend all
 
 ---
 
-## Constant-Time Native Backend (`pmset.native`)
+## Pluggable Constant-Time Native Backends (`pmset.native`)
 
-To eliminate Python's variable-time big-integer side channels, `pmset` ships a compiled C11 + OpenSSL `libcrypto` constant-time backend ([`pmset_ct.c`](src/pmset/_native/pmset_ct.c)) automatically built via [`hatch_build.py`](hatch_build.py) and loaded by [`pmset.native`](src/pmset/native.py):
+To eliminate Python's variable-time big-integer side channels, `pmset` exposes a pluggable [`NativeCryptoBackend`](src/pmset/native.py) interface and backend registry with two built-in C11 providers built automatically via [`hatch_build.py`](hatch_build.py):
 
-- **NIST P-256 (ECDH-OPRF, Exponential ElGamal, Chou-Orlandi OT)**: OpenSSL `NID_X9_62_prime256v1` (NISTZ256 constant-time assembly) with `BN_FLG_CONSTTIME` scalars and `BN_clear_free` / `OPENSSL_cleanse` wiping.
-- **Modular Exponentiation & Inversion (DH-OPRF, RSA-OPRF, Paillier, FNP04)**: OpenSSL `BN_mod_exp_mont_consttime` + **Joye constant-bit-length exponent padding** (`BN_consttime_swap`, formally verified in both Z3 and Lean 4 `PMSet.joye_constant_bitlen_padding`) so even `exp = 1` and `exp = q - 1` execute the exact same Montgomery ladder length.
-- **Ring-LWE Lattice PIR (`oprf_rlwe_pir`, `cuckoo_oprf_pir`)**: Branchless fixed-width `__int128`/`uint64_t` negacyclic convolution, encryption, decryption, and PIR inner products with zero secret-dependent loop skips.
-- **Chou-Orlandi OT, 2-Server DPF/FSS, ElGamal Zero-Test & Bucket Lookup**: Branchless bitwise selection (`pmset_ct_select_bytes`), branchless conditional XOR (`pmset_ct_cond_xor_bytes`, `pmset_ct_dpf_bucket_eval`), non-short-circuiting ElGamal zero testing (`pmset_ct_p256_elgamal_any_zero`), and constant-time full-scan bucket tag lookup (`pmset_ct_bucket_scan_tag`).
-- **Fail-Closed Production Mode**: Set `PMSET_REQUIRE_NATIVE=1` or call `pmset.require_constant_time(True)` to raise `NativeBackendError` if the native shared library is unavailable (preventing silent fallback to pure Python).
-- **Empirical Timing Tests**: `tests/test_constant_time.py` runs differential equivalence tests plus dudect-style interleaved timing invariance checks across P-256 scalars, Joye-padded modexp, OT choice bits, RLWE zero vs dense polynomials, DPF bits, and bucket scan positions.
+| Native Backend | Source | Crypto Engine | Highlights |
+|---|---|---|---|
+| **`aws-lc`** (preferred when available) | [`pmset_ct_awslc.c`](src/pmset/_native/pmset_ct_awslc.c) + [`pmset_ct_common.c`](src/pmset/_native/pmset_ct_common.c) | [AWS-LC](https://github.com/aws/aws-lc) (`s2n-bignum`) | HOL Light formally verified constant-time P-256 & Montgomery assembly, `BN_mod_inverse_blinded`, statically linked & ELF symbol-isolated (`-fvisibility=hidden -Wl,-Bsymbolic -Wl,--exclude-libs,ALL`) |
+| **`openssl`** | [`pmset_ct_openssl.c`](src/pmset/_native/pmset_ct_openssl.c) + [`pmset_ct_common.c`](src/pmset/_native/pmset_ct_common.c) | OpenSSL 3.x `libcrypto` | NISTZ256 constant-time assembly, `BN_FLG_CONSTTIME`, `BN_mod_exp_mont_consttime`, `BN_consttime_swap` |
+| **Custom plugins** | Subclass `NativeCryptoBackend` | Any (BoringSSL, Rust `aws-lc-rs`, HACL\*, HSM) | Plug in via `pmset.register_native_backend(...)` and activate via `pmset.set_native_backend(...)` |
+
+Shared constant-time protections across both built-in backends:
+- **Joye Constant-Bit-Length Exponent Padding**: Formally proved in both Z3 and Lean 4 (`PMSet.joye_constant_bitlen_padding`), ensuring `exp = 1` and `exp = q - 1` execute the exact same Montgomery ladder length.
+- **Branchless C11 Ring-LWE, OT, ElGamal, DPF & Bucket Scan**: Fixed-iteration `__int128`/`uint64_t` RLWE kernels, branchless OT choice masking (`pmset_ct_p256_ot_choose`), non-short-circuiting ElGamal zero-testing (`pmset_ct_p256_elgamal_any_zero`), branchless DPF XOR evaluation (`pmset_ct_dpf_bucket_eval`), and full-scan bucket tag lookup (`pmset_ct_bucket_scan_tag`).
+- **Fail-Closed Production Mode**: Set `PMSET_REQUIRE_NATIVE=1` or call `pmset.require_constant_time(True)` to fail closed if no constant-time native backend is loaded.
+- **Runtime Switching & Interop**: Select a backend via `PMSET_NATIVE_BACKEND=aws-lc|openssl`, `pmset.set_native_backend("aws-lc")`, or `with pmset.use_native_backend("openssl"): ...`. Both backends coexist in the same process and interoperate over the wire across all 12 protocols.
 
 ```bash
-# Inspect active constant-time native backend
+# Inspect registered & active constant-time native backends
 pmset backend
 
-# Enforce fail-closed constant-time native execution
-PMSET_REQUIRE_NATIVE=1 pmset benchmark --size 16
+# Select AWS-LC or OpenSSL explicitly
+PMSET_NATIVE_BACKEND=aws-lc PMSET_REQUIRE_NATIVE=1 pmset benchmark --size 16
+PMSET_NATIVE_BACKEND=openssl PMSET_REQUIRE_NATIVE=1 pmset benchmark --size 16
+
+# Point hatch_build.py / pmset.build_native_library("aws-lc") at a custom AWS-LC install
+AWSLC_PREFIX=/path/to/aws-lc uv pip install -e ".[dev]"
 ```
 
 ### Installation & Usage
 
 ```bash
-# Install package (compiles libpmset_ct automatically via hatch_build.py; requires gcc/clang + OpenSSL libcrypto)
+# Install package (compiles available OpenSSL & AWS-LC backends automatically via hatch_build.py)
 uv pip install -e ".[dev]"
 
-# Explore protocols, inspect backend, run demos, and benchmark all 12 implementations
+# Explore protocols, inspect backends, run demos, and benchmark all 12 implementations
 pmset list
 pmset backend
-pmset demo -p oprf_rlwe_pir
-pmset benchmark --size 16
+pmset demo -p oprf_rlwe_pir --native-backend aws-lc
+pmset benchmark --size 16 --native-backend aws-lc
 
-# Run the full test, constant-time timing, and formal verification suite
+# Run the full test, cross-backend interop, timing invariance, and formal verification suite
 PMSET_REQUIRE_NATIVE=1 pytest
 ```
 

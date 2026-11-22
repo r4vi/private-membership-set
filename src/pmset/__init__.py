@@ -65,12 +65,22 @@ from pmset.protocols import (
 )
 from pmset import native
 from pmset.native import (
+    AWSLCNativeBackend,
+    CSharedLibBackend,
     NativeBackendError,
     NativeBackendInfo,
+    NativeCryptoBackend,
+    OpenSSLNativeBackend,
+    available_native_backends,
     backend_info,
     build_native_library,
+    get_native_backend,
     is_native_available,
+    list_native_backends,
+    register_native_backend,
     require_constant_time,
+    set_native_backend,
+    use_native_backend,
 )
 from pmset.verification import (
     FormalVerifier,
@@ -88,8 +98,10 @@ from pmset.verification import (
 __version__ = "1.0.0"
 
 __all__ = [
+    "AWSLCNativeBackend",
     "BatchQueryResult",
     "BenchmarkRow",
+    "CSharedLibBackend",
     "CUCKOO_OPRF_PIR",
     "CommunicationStats",
     "ComplexityProfile",
@@ -106,8 +118,10 @@ __all__ = [
     "MultiServerPMSetServer",
     "NativeBackendError",
     "NativeBackendInfo",
+    "NativeCryptoBackend",
     "OPRF_RLWE_PIR",
     "OT_GARBLED_BLOOM",
+    "OpenSSLNativeBackend",
     "PMSetClient",
     "PMSetProtocol",
     "PMSetServer",
@@ -134,6 +148,7 @@ __all__ = [
     "Z3Verifier",
     "__version__",
     "all_protocols",
+    "available_native_backends",
     "backend_info",
     "benchmark_protocols",
     "build_native_library",
@@ -142,15 +157,20 @@ __all__ = [
     "execute_batch_query",
     "execute_query",
     "format_benchmark_table",
+    "get_native_backend",
     "get_protocol",
     "is_native_available",
+    "list_native_backends",
     "list_protocols",
     "native",
     "normalize_dataset",
     "normalize_item",
     "protocol_catalog",
+    "register_native_backend",
     "register_protocol",
     "require_constant_time",
+    "set_native_backend",
+    "use_native_backend",
     "verify_all_protocols",
     "verify_protocol",
 ]

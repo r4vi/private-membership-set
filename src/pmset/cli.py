@@ -30,13 +30,17 @@ def _cmd_list(_args: argparse.Namespace) -> int:
 
 
 def _cmd_demo(args: argparse.Namespace) -> int:
+    if args.native_backend:
+        pmset.set_native_backend(args.native_backend)
     proto = pmset.get_protocol(args.protocol)
     dataset = {
         "alice@example.com": b"tier=gold",
         "bob@example.com": b"tier=silver",
         "charlie@example.com": b"tier=bronze",
     }
+    info = pmset.backend_info()
     print(f"Protocol: {proto.metadata.display_name} ({proto.name})")
+    print(f"Native Backend: {info.backend_name} ({info.provider_version})")
     server = proto.create_server(dataset)
     client = proto.create_client(server.public_params())
     for q in ("alice@example.com", "eve@example.com", "bob@example.com"):
@@ -78,20 +82,32 @@ def _cmd_verify(args: argparse.Namespace) -> int:
 
 
 def _cmd_benchmark(args: argparse.Namespace) -> int:
+    if args.native_backend:
+        pmset.set_native_backend(args.native_backend)
+    info = pmset.backend_info()
+    print(f"# Native Backend: {info.backend_name} ({info.provider_version})\n")
     rows = benchmark_protocols(set_size=args.size)
     print(format_benchmark_table(rows))
     return 0
 
 
-def _cmd_backend(_args: argparse.Namespace) -> int:
-    info = pmset.backend_info()
-    print("PMSet Constant-Time Native Backend:")
-    print(f"  Available:       {info.available}")
-    print(f"  Strict Mode:     {info.strict_mode} (PMSET_REQUIRE_NATIVE)")
-    print(f"  Library Path:    {info.library_path}")
-    print(f"  ABI Version:     {info.abi_version}")
-    print(f"  OpenSSL Version: {info.openssl_version}")
-    return 0 if info.available else 1
+def _cmd_backend(args: argparse.Namespace) -> int:
+    if args.use:
+        pmset.set_native_backend(args.use)
+    active = pmset.backend_info()
+    print("Active PMSet Constant-Time Native Backend:")
+    print(f"  Active Backend:   {active.backend_name}")
+    print(f"  Provider Version: {active.provider_version}")
+    print(f"  ABI Version:      {active.abi_version}")
+    print(f"  Strict Mode:      {active.strict_mode} (PMSET_REQUIRE_NATIVE)")
+    print(f"  Library Path:     {active.library_path}")
+    print("\nRegistered Native Backends:")
+    for name in pmset.list_native_backends():
+        bi = pmset.backend_info(name)
+        marker = "*" if bi.backend_name == active.backend_name and active.available else " "
+        status = bi.provider_version if bi.available else "unavailable"
+        print(f"  {marker} {name:12s} [{'available' if bi.available else 'missing':9s}] {status}")
+    return 0 if active.available else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -102,11 +118,20 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("list", help="List all registered PMSet protocols and formal specs")
-    sub.add_parser("backend", help="Inspect the active constant-time native C + OpenSSL backend")
+
+    p_backend = sub.add_parser(
+        "backend", help="Inspect or select pluggable constant-time native backends (aws-lc, openssl)"
+    )
+    p_backend.add_argument(
+        "--use", default=None, help="Select native backend to inspect (e.g. aws-lc, openssl)"
+    )
 
     p_demo = sub.add_parser("demo", help="Run a live membership query demo")
     p_demo.add_argument(
         "-p", "--protocol", default="oprf_rlwe_pir", help="Protocol name (default: oprf_rlwe_pir)"
+    )
+    p_demo.add_argument(
+        "--native-backend", default=None, help="Native crypto backend (aws-lc, openssl)"
     )
 
     p_ver = sub.add_parser("verify", help="Formally verify protocols in Z3, TLA+, and/or Lean 4")
@@ -121,6 +146,9 @@ def main(argv: list[str] | None = None) -> int:
 
     p_bench = sub.add_parser("benchmark", help="Benchmark latency and bandwidth across all protocols")
     p_bench.add_argument("-n", "--size", type=int, default=16, help="Server set size (default: 16)")
+    p_bench.add_argument(
+        "--native-backend", default=None, help="Native crypto backend (aws-lc, openssl)"
+    )
 
     args = parser.parse_args(argv)
     if args.command == "list":
