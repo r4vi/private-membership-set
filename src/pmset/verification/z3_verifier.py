@@ -679,6 +679,50 @@ def _z3_constant_time_gadget_proofs() -> list[PropertyResult]:
     ]
 
 
+def _z3_oprf_filter_proofs() -> list[PropertyResult]:
+    """Prove OPRF exact tag-set membership equivalence AND Bloom filter zero-false-negative completeness."""
+    def _neg_exact_tag_lookup() -> list["z3.BoolRef"]:
+        Item = z3.IntSort()
+        Tag = z3.IntSort()
+        in_S = z3.Function("in_S", Item, z3.BoolSort())
+        oprf_tag = z3.Function("oprf_tag", Item, Tag)
+        a, b, x, s = z3.Ints("a b x s")
+        # Under collision resistance (injectivity of 128-bit OPRF tag on the item domain):
+        inj = z3.ForAll([a, b], z3.Implies(oprf_tag(a) == oprf_tag(b), a == b))
+        in_tag_set = z3.Exists([s], z3.And(in_S(s), oprf_tag(s) == oprf_tag(x)))
+        return [inj, in_tag_set != in_S(x)]
+
+    def _neg_bloom_no_false_negatives() -> list["z3.BoolRef"]:
+        Item = z3.IntSort()
+        in_S = z3.Function("in_S", Item, z3.BoolSort())
+        h1 = z3.Function("h1", Item, z3.IntSort())
+        h2 = z3.Function("h2", Item, z3.IntSort())
+        h3 = z3.Function("h3", Item, z3.IntSort())
+        bit = z3.Function("bit", z3.IntSort(), z3.BoolSort())
+        s, x = z3.Ints("s x")
+        bloom_built = z3.ForAll(
+            [s],
+            z3.Implies(in_S(s), z3.And(bit(h1(s)), bit(h2(s)), bit(h3(s)))),
+        )
+        bloom_query_x = z3.And(bit(h1(x)), bit(h2(x)), bit(h3(x)))
+        return [bloom_built, in_S(x), z3.Not(bloom_query_x)]
+
+    return [
+        _prove_unsat(
+            "oprf_filter_exact_tag_sound_and_complete",
+            "correctness",
+            _neg_exact_tag_lookup,
+            "Exact OPRF tag-set lookup returns True iff x in S under tag collision resistance",
+        ),
+        _prove_unsat(
+            "oprf_filter_bloom_zero_false_negatives",
+            "correctness",
+            _neg_bloom_no_false_negatives,
+            "Bloom filter over OPRF tags has zero false negatives for all x in S",
+        ),
+    ]
+
+
 class Z3Verifier(FormalVerifier):
     """Formal SMT verifier backed by Z3 covering every registered PMSet protocol."""
 
@@ -739,6 +783,7 @@ class Z3Verifier(FormalVerifier):
         elif name == "ecdh_oprf_filter":
             props.append(_z3_prime_group_oprf_correctness())
             props.append(_z3_prime_group_oprf_blinding_privacy())
+            props.extend(_z3_oprf_filter_proofs())
         elif name == "ot_garbled_bloom":
             props.extend(_z3_ot_gbf_proofs())
         elif name == "two_server_dpf_pir":

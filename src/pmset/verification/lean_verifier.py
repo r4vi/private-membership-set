@@ -27,6 +27,16 @@ def _find_repo_root() -> Path:
     return Path.cwd()
 
 
+def _find_lean_dir() -> Path:
+    repo_lean = _find_repo_root() / "verification" / "lean"
+    if repo_lean.is_dir():
+        return repo_lean
+    bundled_lean = Path(__file__).resolve().parent.parent / "_verification_assets" / "lean"
+    if bundled_lean.is_dir():
+        return bundled_lean
+    return repo_lean
+
+
 def find_lake_binary() -> Path | None:
     """Locate the Lean 4 ``lake`` executable on PATH or under ``~/.elan/bin``."""
     on_path = shutil.which("lake")
@@ -39,15 +49,16 @@ def find_lake_binary() -> Path | None:
 
 
 class LeanVerifier(FormalVerifier):
-    """Builds the Lean 4 verification library and checks theorem presence + zero sorry."""
+    """Builds the Lean 4 verification library and checks theorem presence + zero sorry in the Lean kernel."""
 
     def __init__(self, lean_dir: Path | None = None) -> None:
-        self._lean_dir = lean_dir or (_find_repo_root() / "verification" / "lean")
+        self._lean_dir = lean_dir or _find_lean_dir()
         self._lake = find_lake_binary()
         self._build_checked = False
         self._build_ok = False
         self._build_detail = ""
         self._build_ms = 0.0
+        self._kernel_thm_cache: dict[str, tuple[bool, str]] = {}
 
     @property
     def backend(self) -> VerificationBackend:
@@ -56,18 +67,21 @@ class LeanVerifier(FormalVerifier):
     def is_available(self) -> bool:
         return self._lake is not None and self._lean_dir.is_dir()
 
+    def _lake_env(self) -> dict[str, str]:
+        env = os.environ.copy()
+        elan_bin = str(Path.home() / ".elan" / "bin")
+        if elan_bin not in env.get("PATH", ""):
+            env["PATH"] = f"{elan_bin}:{env.get('PATH', '')}"
+        return env
+
     def _ensure_built(self) -> PropertyResult:
         if not self._build_checked:
             assert self._lake is not None
             t0 = time.perf_counter()
-            env = os.environ.copy()
-            elan_bin = str(Path.home() / ".elan" / "bin")
-            if elan_bin not in env.get("PATH", ""):
-                env["PATH"] = f"{elan_bin}:{env.get('PATH', '')}"
             proc = subprocess.run(
                 [str(self._lake), "build"],
                 cwd=str(self._lean_dir),
-                env=env,
+                env=self._lake_env(),
                 capture_output=True,
                 text=True,
                 timeout=180,
@@ -124,6 +138,27 @@ class LeanVerifier(FormalVerifier):
             duration_ms=elapsed,
         )
 
+    def _verify_theorem_in_kernel(self, thm_fqn: str) -> tuple[bool, str]:
+        if thm_fqn in self._kernel_thm_cache:
+            return self._kernel_thm_cache[thm_fqn]
+        assert self._lake is not None
+        script = f"import PMSet\n#check @{thm_fqn}\n#print axioms {thm_fqn}\n"
+        proc = subprocess.run(
+            [str(self._lake), "env", "lean", "--stdin"],
+            cwd=str(self._lean_dir),
+            env=self._lake_env(),
+            input=script,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        out = (proc.stdout + "\n" + proc.stderr).strip()
+        ok = proc.returncode == 0 and "sorryAx" not in out
+        res = (ok, out)
+        self._kernel_thm_cache[thm_fqn] = res
+        return res
+
     def _check_protocol_theorem(self, protocol: PMSetProtocol) -> PropertyResult:
         t0 = time.perf_counter()
         thm_fqn = protocol.metadata.lean_theorem
@@ -139,13 +174,16 @@ class LeanVerifier(FormalVerifier):
         protocols_file = self._lean_dir / "PMSet" / "Protocols.lean"
         text = protocols_file.read_text(encoding="utf-8") if protocols_file.is_file() else ""
         found = bool(re.search(rf"\btheorem\s+{re.escape(thm_short)}\b", text))
+        kernel_ok, kernel_out = (
+            self._verify_theorem_in_kernel(thm_fqn) if (found and self._build_ok) else (False, "")
+        )
         elapsed = (time.perf_counter() - t0) * 1000.0
-        if found and self._build_ok:
+        if found and self._build_ok and kernel_ok:
             return PropertyResult(
                 name=f"lean:{thm_fqn}",
                 category="correctness",
                 status=PropertyStatus.PROVED,
-                detail=f"Kernel-verified theorem `{thm_fqn}` in PMSet/Protocols.lean",
+                detail=f"Kernel-verified theorem `{thm_fqn}` ({kernel_out.splitlines()[-1] if kernel_out else 'verified'})",
                 backend=self.backend,
                 duration_ms=elapsed,
             )
@@ -153,7 +191,7 @@ class LeanVerifier(FormalVerifier):
             name=f"lean:{thm_fqn}",
             category="correctness",
             status=PropertyStatus.FAILED,
-            detail=f"Theorem `{thm_fqn}` not found or build failed",
+            detail=f"Theorem `{thm_fqn}` kernel check failed: {kernel_out or 'not found'}",
             backend=self.backend,
             duration_ms=elapsed,
         )

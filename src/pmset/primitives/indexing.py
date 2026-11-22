@@ -269,8 +269,11 @@ class CuckooTable:
         num_bins: int | None = None,
         use_aead: bool = True,
         max_kicks: int = 500,
+        stash_capacity: int = 2,
     ) -> tuple[CuckooTable, int]:
         """Build a 2-hash Cuckoo table; returns ``(table, record_size)``."""
+        if stash_capacity < 0:
+            raise ValueError(f"stash_capacity must be >= 0, got {stash_capacity}")
         n = len(oprf_entries)
         bins = num_bins if num_bins is not None else max(4, int(math.ceil(max(n, 1) * 2.4)))
         if bins < 2:
@@ -318,6 +321,19 @@ class CuckooTable:
             if not placed:
                 stash.append(cur_rec)
 
+        # Pad stash with indistinguishable dummy records to hide eviction count
+        while len(stash) < stash_capacity:
+            stash.append(
+                _pack_record(
+                    secrets.token_bytes(_TAG_LEN),
+                    secrets.token_bytes(max_ct_len),
+                    max_ct_len,
+                )
+            )
+        for i in range(len(stash) - 1, 0, -1):
+            j = secrets.randbelow(i + 1)
+            stash[i], stash[j] = stash[j], stash[i]
+
         # Fill empty slots with dummy indistinguishable records
         final_slots = tuple(
             rec if rec is not None else _pack_record(
@@ -344,7 +360,13 @@ class BloomFilter:
         self.num_bits = num_bits
         self.num_hashes = num_hashes
         self.seed = seed if seed is not None else secrets.token_bytes(16)
+        if not self.seed:
+            raise ValueError("BloomFilter seed must be non-empty")
         byte_len = (num_bits + 7) // 8
+        if bits is not None and len(bits) != byte_len:
+            raise ValueError(
+                f"BloomFilter bits byte length ({len(bits)}) does not match num_bits ({num_bits} -> {byte_len} bytes)"
+            )
         self.bits = bytearray(byte_len) if bits is None else bytearray(bits)
 
     @classmethod

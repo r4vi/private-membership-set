@@ -360,6 +360,10 @@ class _LoadedCTLib:
         lib.pmset_ct_rlwe_pir_dot.restype = None
 
         self.abi_version: int = int(lib.pmset_ct_abi_version())
+        if self.abi_version != 2:
+            raise NativeBackendError(
+                f"Incompatible native library ABI version {self.abi_version} in {path} (expected 2)"
+            )
         self.provider_name: str = lib.pmset_ct_provider_name().decode("utf-8")
         self.provider_version: str = lib.pmset_ct_provider_version().decode("utf-8")
 
@@ -394,7 +398,7 @@ class CSharedLibBackend(NativeCryptoBackend):
         if self._lib_path.is_file():
             try:
                 self._loaded = _LoadedCTLib(self._lib_path)
-            except OSError:
+            except (OSError, AttributeError, NativeBackendError):
                 self._loaded = None
         return self._loaded
 
@@ -435,16 +439,22 @@ class CSharedLibBackend(NativeCryptoBackend):
         return bool(self._require_lib().lib.pmset_ct_memcmp(a, b, len(a)))
 
     def select_bytes(self, a: bytes, b: bytes, select_b: int) -> bytes:
+        if len(a) != len(b):
+            raise ValueError(f"select_bytes length mismatch: {len(a)} != {len(b)}")
         out = ctypes.create_string_buffer(len(a))
         self._require_lib().lib.pmset_ct_select_bytes(out, a, b, len(a), select_b & 1)
         return out.raw
 
     def xor_bytes(self, a: bytes, b: bytes) -> bytes:
+        if len(a) != len(b):
+            raise ValueError(f"xor_bytes length mismatch: {len(a)} != {len(b)}")
         out = ctypes.create_string_buffer(len(a))
         self._require_lib().lib.pmset_ct_xor_bytes(out, a, b, len(a))
         return out.raw
 
     def cond_xor_bytes(self, acc: bytes, src: bytes, cond: int) -> bytes:
+        if len(acc) != len(src):
+            raise ValueError(f"cond_xor_bytes length mismatch: {len(acc)} != {len(src)}")
         buf = ctypes.create_string_buffer(acc, len(acc))
         self._require_lib().lib.pmset_ct_cond_xor_bytes(buf, src, len(acc), cond & 1)
         return buf.raw
@@ -454,6 +464,12 @@ class CSharedLibBackend(NativeCryptoBackend):
         bucket_len = len(buckets[0]) if num_buckets else 0
         if num_buckets == 0 or bucket_len == 0:
             return b""
+        if len(bits) < num_buckets:
+            raise ValueError(
+                f"dpf_bucket_eval requires len(bits) >= len(buckets) ({len(bits)} < {num_buckets})"
+            )
+        if any(len(b) != bucket_len for b in buckets):
+            raise ValueError("All buckets in dpf_bucket_eval must have identical byte length")
         flat = b"".join(buckets)
         bit_bytes = bytes(b & 1 for b in bits[:num_buckets])
         out = ctypes.create_string_buffer(bucket_len)
@@ -465,24 +481,44 @@ class CSharedLibBackend(NativeCryptoBackend):
     def bucket_scan_tag(
         self, bucket_bytes: bytes, record_size: int, target_tag: bytes
     ) -> tuple[bool, bytes]:
-        num_records = len(bucket_bytes) // record_size if record_size > 0 else 0
+        if record_size <= 0:
+            raise ValueError(f"record_size must be > 0, got {record_size}")
+        if len(target_tag) > record_size:
+            raise ValueError(
+                f"target_tag length ({len(target_tag)}) cannot exceed record_size ({record_size})"
+            )
+        if len(bucket_bytes) % record_size != 0:
+            raise ValueError(
+                f"bucket_bytes length ({len(bucket_bytes)}) must be a multiple of record_size ({record_size})"
+            )
+        num_records = len(bucket_bytes) // record_size
         if num_records == 0:
             return False, b""
         matched = ctypes.create_string_buffer(record_size)
-        found = self._require_lib().lib.pmset_ct_bucket_scan_tag(
+        rc = self._require_lib().lib.pmset_ct_bucket_scan_tag(
             bucket_bytes, num_records, record_size, target_tag, len(target_tag), matched
         )
-        return bool(found), matched.raw
+        if rc < 0:
+            raise NativeBackendError(f"[{self._name}] pmset_ct_bucket_scan_tag failed (rc={rc})")
+        return bool(rc), matched.raw
 
     def modexp(self, base: int, exp: int, mod: int, *, order: int | None = None) -> int:
+        if mod <= 1:
+            raise ValueError(f"mod must be > 1, got {mod}")
+        if (mod & 1) == 0:
+            raise NativeBackendError(
+                f"[{self._name}] Constant-time Montgomery modexp requires an odd modulus"
+            )
         lib = self._require_lib().lib
         mod_len = (mod.bit_length() + 7) // 8
-        b_bytes = _int_to_be(base % mod, mod_len)
+        b_val = base if base >= 0 else (base % mod)
+        b_bytes = _int_to_be(b_val, mod_len)
         m_bytes = _int_to_be(mod, mod_len)
         out = ctypes.create_string_buffer(mod_len)
         if order is not None and order > 0:
             ord_len = (order.bit_length() + 7) // 8
-            e_bytes = _int_to_be(exp % order, ord_len)
+            e_val = exp if exp >= 0 else (exp % order)
+            e_bytes = _int_to_be(e_val, ord_len)
             o_bytes = _int_to_be(order, ord_len)
             rc = lib.pmset_ct_modexp_order(
                 b_bytes, len(b_bytes),
@@ -492,6 +528,8 @@ class CSharedLibBackend(NativeCryptoBackend):
                 out, mod_len,
             )
         else:
+            if exp < 0:
+                raise ValueError("Negative exponent must be inverted before modexp")
             e_bytes = _int_to_be(exp, mod_len)
             rc = lib.pmset_ct_modexp(
                 b_bytes, len(b_bytes),
@@ -504,9 +542,12 @@ class CSharedLibBackend(NativeCryptoBackend):
         return int.from_bytes(out.raw, "big")
 
     def modinv(self, a: int, mod: int) -> int:
+        if mod <= 1:
+            raise ValueError(f"mod must be > 1, got {mod}")
         lib = self._require_lib().lib
         mod_len = (mod.bit_length() + 7) // 8
-        a_bytes = _int_to_be(a % mod, mod_len)
+        a_val = a if a >= 0 else (a % mod)
+        a_bytes = _int_to_be(a_val, mod_len)
         m_bytes = _int_to_be(mod, mod_len)
         out = ctypes.create_string_buffer(mod_len)
         rc = lib.pmset_ct_modinv(a_bytes, len(a_bytes), m_bytes, len(m_bytes), out, mod_len)
@@ -515,7 +556,7 @@ class CSharedLibBackend(NativeCryptoBackend):
         return int.from_bytes(out.raw, "big")
 
     def p256_scalar_mul(self, scalar: int, pt_bytes: bytes | None, order_n: int) -> bytes:
-        k = scalar % order_n
+        k = scalar if 0 <= scalar < order_n else (scalar % order_n)
         if k == 0:
             return b"\x00"
         s32 = k.to_bytes(32, "big")
@@ -589,6 +630,10 @@ class CSharedLibBackend(NativeCryptoBackend):
 
     def rlwe_poly_mul(self, a: Sequence[int], b: Sequence[int], q: int) -> list[int]:
         n = len(a)
+        if len(b) != n:
+            raise ValueError(f"rlwe_poly_mul length mismatch: {len(a)} != {len(b)}")
+        if not (0 < q < (1 << 63)):
+            raise ValueError(f"rlwe_poly_mul requires 0 < q < 2^63, got {q}")
         arr_a = (ctypes.c_uint64 * n)(*a)
         arr_b = (ctypes.c_uint64 * n)(*b)
         arr_out = (ctypes.c_uint64 * n)()
@@ -605,6 +650,10 @@ class CSharedLibBackend(NativeCryptoBackend):
         t: int,
     ) -> list[int]:
         n = len(a)
+        if not (len(sk) == n and len(err) == n and len(m) == n):
+            raise ValueError("rlwe_encrypt polynomial lengths must all equal len(a)")
+        if not (0 < q < (1 << 63)) or t < 2:
+            raise ValueError(f"rlwe_encrypt requires 0 < q < 2^63 and t >= 2, got q={q}, t={t}")
         arr_a = (ctypes.c_uint64 * n)(*a)
         arr_sk = (ctypes.c_int64 * n)(*sk)
         arr_err = (ctypes.c_int64 * n)(*err)
@@ -617,6 +666,10 @@ class CSharedLibBackend(NativeCryptoBackend):
         self, a: Sequence[int], b: Sequence[int], sk: Sequence[int], q: int, t: int
     ) -> list[int]:
         n = len(a)
+        if not (len(b) == n and len(sk) == n):
+            raise ValueError("rlwe_decrypt polynomial lengths must all equal len(a)")
+        if not (0 < q < (1 << 63)) or t < 2:
+            raise ValueError(f"rlwe_decrypt requires 0 < q < 2^63 and t >= 2, got q={q}, t={t}")
         arr_a = (ctypes.c_uint64 * n)(*a)
         arr_b = (ctypes.c_uint64 * n)(*b)
         arr_sk = (ctypes.c_int64 * n)(*sk)
@@ -632,9 +685,19 @@ class CSharedLibBackend(NativeCryptoBackend):
         q: int,
     ) -> tuple[list[int], list[int]]:
         num_buckets = len(ct_a_list)
+        if not (len(ct_b_list) == num_buckets and len(pt_list) == num_buckets):
+            raise ValueError("rlwe_pir_dot bucket list lengths must match")
+        if not (0 < q < (1 << 63)):
+            raise ValueError(f"rlwe_pir_dot requires 0 < q < 2^63, got {q}")
         if num_buckets == 0:
             return [], []
         n = len(ct_a_list[0])
+        if (
+            any(len(p) != n for p in ct_a_list)
+            or any(len(p) != n for p in ct_b_list)
+            or any(len(p) != n for p in pt_list)
+        ):
+            raise ValueError("All polynomials in rlwe_pir_dot must have identical degree n")
         total = num_buckets * n
         flat_a = (ctypes.c_uint64 * total)(*(c for poly in ct_a_list for c in poly))
         flat_b = (ctypes.c_uint64 * total)(*(c for poly in ct_b_list for c in poly))
@@ -952,10 +1015,17 @@ def ct_cond_xor_bytes(acc: bytes, src: bytes, cond: int) -> bytes:
 def ct_dpf_bucket_eval(buckets: Sequence[bytes], bits: Sequence[int]) -> bytes:
     if not buckets or not buckets[0]:
         return b""
+    num_buckets = len(buckets)
+    bucket_len = len(buckets[0])
+    if len(bits) < num_buckets:
+        raise ValueError(
+            f"ct_dpf_bucket_eval requires len(bits) >= len(buckets) ({len(bits)} < {num_buckets})"
+        )
+    if any(len(b) != bucket_len for b in buckets):
+        raise ValueError("All buckets in ct_dpf_bucket_eval must have identical byte length")
     backend = _get_or_enforce()
     if backend is not None:
         return backend.dpf_bucket_eval(buckets, bits)
-    bucket_len = len(buckets[0])
     acc = bytearray(bucket_len)
     for bit, bkt in zip(bits, buckets):
         mask = (-(bit & 1)) & 0xFF
@@ -967,7 +1037,17 @@ def ct_dpf_bucket_eval(buckets: Sequence[bytes], bits: Sequence[int]) -> bytes:
 def ct_bucket_scan_tag(
     bucket_bytes: bytes, record_size: int, target_tag: bytes
 ) -> tuple[bool, bytes]:
-    if record_size <= 0 or not bucket_bytes:
+    if record_size <= 0:
+        raise ValueError(f"record_size must be > 0, got {record_size}")
+    if len(target_tag) > record_size:
+        raise ValueError(
+            f"target_tag length ({len(target_tag)}) cannot exceed record_size ({record_size})"
+        )
+    if len(bucket_bytes) % record_size != 0:
+        raise ValueError(
+            f"bucket_bytes length ({len(bucket_bytes)}) must be a multiple of record_size ({record_size})"
+        )
+    if not bucket_bytes:
         return False, b""
     backend = _get_or_enforce()
     if backend is not None:
@@ -988,11 +1068,16 @@ def ct_modexp(base: int, exp: int, mod: int, *, order: int | None = None) -> int
     if mod <= 1:
         raise ValueError("mod must be > 1")
     if exp < 0:
-        base = ct_modinv(base % mod, mod)
+        base = ct_modinv(base, mod)
         exp = -exp
     backend = _get_or_enforce()
-    if backend is not None and (mod & 1) == 1:
-        return backend.modexp(base, exp, mod, order=order)
+    if backend is not None:
+        if (mod & 1) == 1:
+            return backend.modexp(base, exp, mod, order=order)
+        if _STRICT_MODE:
+            raise NativeBackendError(
+                "Constant-time native modexp requires an odd modulus (PMSET_REQUIRE_NATIVE=1)"
+            )
     return pow(base, exp, mod)
 
 
@@ -1049,10 +1134,23 @@ def ct_p256_elgamal_any_zero(
     return backend.p256_elgamal_any_zero(sk, wire_pairs)
 
 
+def _check_rlwe_q_native(backend: NativeCryptoBackend | None, q: int) -> bool:
+    if backend is None:
+        return False
+    if not (0 < q < (1 << 63)):
+        if _STRICT_MODE:
+            raise NativeBackendError(
+                f"Constant-time native RLWE kernel requires 0 < q < 2^63, got q={q}"
+            )
+        return False
+    return True
+
+
 def ct_rlwe_poly_mul(a: Sequence[int], b: Sequence[int], q: int) -> list[int] | None:
     backend = _get_or_enforce()
-    if backend is None or q >= (1 << 63):
+    if not _check_rlwe_q_native(backend, q):
         return None
+    assert backend is not None
     return backend.rlwe_poly_mul(a, b, q)
 
 
@@ -1060,8 +1158,9 @@ def ct_rlwe_encrypt(
     a: Sequence[int], sk: Sequence[int], err: Sequence[int], m: Sequence[int], q: int, t: int
 ) -> list[int] | None:
     backend = _get_or_enforce()
-    if backend is None or q >= (1 << 63):
+    if not _check_rlwe_q_native(backend, q):
         return None
+    assert backend is not None
     return backend.rlwe_encrypt(a, sk, err, m, q, t)
 
 
@@ -1069,8 +1168,9 @@ def ct_rlwe_decrypt(
     a: Sequence[int], b: Sequence[int], sk: Sequence[int], q: int, t: int
 ) -> list[int] | None:
     backend = _get_or_enforce()
-    if backend is None or q >= (1 << 63):
+    if not _check_rlwe_q_native(backend, q):
         return None
+    assert backend is not None
     return backend.rlwe_decrypt(a, b, sk, q, t)
 
 
@@ -1081,6 +1181,7 @@ def ct_rlwe_pir_dot(
     q: int,
 ) -> tuple[list[int], list[int]] | None:
     backend = _get_or_enforce()
-    if backend is None or q >= (1 << 63):
+    if not _check_rlwe_q_native(backend, q):
         return None
+    assert backend is not None
     return backend.rlwe_pir_dot(ct_a_list, ct_b_list, pt_list, q)

@@ -40,6 +40,10 @@ class PaillierPublicKey:
 
     n: int
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.n, int) or self.n < 15 or (self.n & 1) == 0:
+            raise ValueError(f"Paillier modulus n must be an odd integer >= 15, got {self.n!r}")
+
     @property
     def n_sq(self) -> int:
         return self.n * self.n
@@ -96,6 +100,7 @@ class PaillierHE(AdditiveHE):
         self.n_sq = self.n * self.n
         self.g = self.n + 1
         self.lam = lcm(p - 1, q - 1)
+        self._group_exp = self.n * self.lam
         # L(g^lam mod n^2) = L((1 + lam*n) mod n^2) = lam mod n, so mu = lam^-1 mod n
         self.mu = ct_modinv(self.lam, self.n)
         self.public_key = PaillierPublicKey(n=self.n)
@@ -106,7 +111,7 @@ class PaillierHE(AdditiveHE):
     def decrypt(self, c: int) -> int:
         from pmset.native import ct_modexp
 
-        u = ct_modexp(c, self.lam, self.n_sq)
+        u = ct_modexp(c, self.lam, self.n_sq, order=self._group_exp)
         l_u = (u - 1) // self.n
         return (l_u * self.mu) % self.n
 

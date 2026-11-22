@@ -169,8 +169,9 @@ def point_add(P: ECPoint, Q: ECPoint) -> ECPoint:
 
 
 def scalar_mul(k: int, P: ECPoint) -> ECPoint:
-    """Compute k * P on P-256 in constant time via OpenSSL NISTZ256 assembly when available."""
-    k = k % P256_N
+    """Compute k * P on P-256 in constant time via native backend when available."""
+    if not (0 <= k < P256_N):
+        k = k % P256_N
     if k == 0 or P.is_infinity:
         return P256_INFINITY
     from pmset.native import ct_p256_scalar_mul
@@ -195,24 +196,37 @@ def random_scalar() -> int:
     return 1 + secrets.randbelow(P256_N - 1)
 
 
+_H2C_BATCH_WINDOW = 16
+
+
 def hash_to_curve(data: bytes, domain: bytes = b"PMSET-P256-H2C-v1") -> ECPoint:
     """Deterministically hash arbitrary bytes to a non-identity point on P-256.
 
-    Uses domain-separated SHA-256 counter try-and-increment with canonical square
-    root parity. Expected iterations: 2.
+    Evaluates fixed-size windows of ``_H2C_BATCH_WINDOW = 16`` candidates without
+    early exit and selects the first quadratic residue branchlessly via
+    ``ct_select_bytes`` (succeeding in the first fixed window with probability
+    1 - 2^-16 = 99.9985%).
     """
+    from pmset.native import ct_select_bytes
+
     p = P256_P
-    for counter in range(256):
-        digest = hashlib.sha256(domain + counter.to_bytes(2, "big") + data).digest()
-        x = int.from_bytes(digest, "big") % p
-        rhs = (pow(x, 3, p) + P256_A * x + P256_B) % p
-        y = pow(rhs, _P256_SQRT_EXP, p)
-        if (y * y) % p == rhs:
-            # Select canonical y parity from an independent bit
+    selected = b"\x02" + (P256_GX).to_bytes(32, "big")
+    found = 0
+    for batch_start in range(0, 256, _H2C_BATCH_WINDOW):
+        for counter in range(batch_start, min(256, batch_start + _H2C_BATCH_WINDOW)):
+            digest = hashlib.sha256(domain + counter.to_bytes(2, "big") + data).digest()
+            x = int.from_bytes(digest, "big") % p
+            rhs = (pow(x, 3, p) + P256_A * x + P256_B) % p
+            y = pow(rhs, _P256_SQRT_EXP, p)
+            is_qr = 1 if ((y * y) % p == rhs and rhs != 0) else 0
             parity = hashlib.sha256(b"PARITY" + digest).digest()[0] & 1
             if (y & 1) != parity:
                 y = p - y
-            pt = ECPoint(x, y)
-            if not pt.is_infinity:
-                return pt
+            prefix = b"\x03" if (y & 1) else b"\x02"
+            cand = prefix + x.to_bytes(32, "big")
+            take = is_qr & (1 ^ found)
+            selected = ct_select_bytes(selected, cand, take)
+            found |= is_qr
+        if found:
+            return ECPoint.from_compressed_bytes(selected)
     raise RuntimeError("hash_to_curve failed to find curve point in 256 attempts")

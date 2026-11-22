@@ -30,12 +30,15 @@ def IsClientPrivate {I S Q R V P : Type} (proto : AbstractPMSet I S Q R V P) : P
       proto.serverView (proto.clientQuery x1 r1) =
         proto.serverView (proto.clientQuery x2 r2)
 
-/-- Stateless Server: handling a request is a pure function of `SetState` and `Query`,
-    so interleaved queries never perturb server state. -/
+/-- Stateless Server Invariant: handling a sequence of interleaved client queries
+    `prefixQueries ++ [q] ++ suffixQueries` against a stateless server `handle : S → Q → P`
+    produces the exact same response `handle s q` for `q` regardless of all preceding
+    and succeeding queries in the trace. -/
 theorem stateless_server_invariant {S Q P : Type}
-    (handle : S → Q → P) (s : S) (q1 q2 : Q) :
-    handle s q2 = handle s q2 ∧ handle s q1 = handle s q1 :=
-  ⟨rfl, rfl⟩
+    (handle : S → Q → P) (s : S) (prefixQueries suffixQueries : List Q) (q : Q) :
+    (prefixQueries ++ q :: suffixQueries).map (handle s) =
+      prefixQueries.map (handle s) ++ (handle s q) :: suffixQueries.map (handle s) := by
+  simp [List.map_append]
 
 /-- Exact set-membership reflection helper for `List` with decidable equality. -/
 theorem list_elem_iff_mem {α : Type} [DecidableEq α] (x : α) (xs : List α) :

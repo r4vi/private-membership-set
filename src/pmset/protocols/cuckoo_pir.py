@@ -210,12 +210,19 @@ class _CuckooOPRFPIRSession(PMSetSession):
 class CuckooOPRFPIRClient(PMSetClient):
     """Client for Cuckoo-Hashed OPRF + PIR."""
 
-    def __init__(self, public_params: PublicParams) -> None:
+    def __init__(
+        self,
+        public_params: PublicParams,
+        *,
+        pir_override: SingleServerPIR | None = None,
+    ) -> None:
+        from pmset.protocols.oprf_pir import _make_pir_from_params
+
         if public_params.protocol != "cuckoo_oprf_pir":
             raise ValueError(f"Protocol mismatch: got '{public_params.protocol}'")
         p = public_params.params
         self._oprf = ECDHOPRF.from_public_params(p["oprf"])
-        self._pir = RLWEPIR(RLWEParams.from_dict(p["pir"]["rlwe"]))
+        self._pir = pir_override if pir_override is not None else _make_pir_from_params(p["pir"])
         self._num_bins = int(p["num_bins"])
         self._cuckoo_seed = bytes(p["cuckoo_seed"])
         self._record_size = int(p["record_size"])
@@ -278,4 +285,4 @@ class CuckooOPRFPIRProtocol(PMSetProtocol):
         return CuckooOPRFPIRServer(items, **config)
 
     def create_client(self, public_params: PublicParams, **config: Any) -> CuckooOPRFPIRClient:
-        return CuckooOPRFPIRClient(public_params)
+        return CuckooOPRFPIRClient(public_params, pir_override=config.get("pir"))

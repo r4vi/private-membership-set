@@ -91,7 +91,13 @@ void pmset_ct_dpf_bucket_eval(
     size_t num_buckets,
     size_t bucket_len,
     const uint8_t *bits) {
+    if (!out || bucket_len == 0) {
+        return;
+    }
     memset(out, 0, bucket_len);
+    if (!buckets_flat || !bits || num_buckets == 0) {
+        return;
+    }
     for (size_t i = 0; i < num_buckets; i++) {
         uint8_t mask = ct_mask_u8(bits[i]);
         const uint8_t *bkt = buckets_flat + (i * bucket_len);
@@ -108,7 +114,13 @@ int pmset_ct_bucket_scan_tag(
     const uint8_t *target_tag,
     size_t tag_len,
     uint8_t *matched_record_out) {
+    if (!matched_record_out || record_size == 0 || tag_len > record_size) {
+        return -1;
+    }
     memset(matched_record_out, 0, record_size);
+    if (!bucket || !target_tag || num_records == 0) {
+        return 0;
+    }
     uint8_t found_any = 0;
     for (size_t i = 0; i < num_records; i++) {
         const uint8_t *rec = bucket + (i * record_size);

@@ -27,13 +27,16 @@ _TAG_LIST = 0x07
 _TAG_DICT = 0x08
 
 _U32 = struct.Struct(">I")
+_MAX_DEPTH = 64
 
 
 class SerializationError(ValueError):
     """Raised when a wire payload cannot be serialized or deserialized."""
 
 
-def _encode_into(value: Any, out: bytearray) -> None:
+def _encode_into(value: Any, out: bytearray, depth: int = 0) -> None:
+    if depth > _MAX_DEPTH:
+        raise SerializationError(f"Maximum wire nesting depth ({_MAX_DEPTH}) exceeded")
     if value is None:
         out.append(_TAG_NONE)
     elif isinstance(value, bool):
@@ -62,7 +65,7 @@ def _encode_into(value: Any, out: bytearray) -> None:
         out.append(_TAG_LIST)
         out.extend(_U32.pack(len(value)))
         for elem in value:
-            _encode_into(elem, out)
+            _encode_into(elem, out, depth + 1)
     elif isinstance(value, dict):
         out.append(_TAG_DICT)
         out.extend(_U32.pack(len(value)))
@@ -72,7 +75,7 @@ def _encode_into(value: Any, out: bytearray) -> None:
             key_bytes = key.encode("utf-8")
             out.extend(_U32.pack(len(key_bytes)))
             out.extend(key_bytes)
-            _encode_into(value[key], out)
+            _encode_into(value[key], out, depth + 1)
     else:
         raise SerializationError(f"Unsupported value type for wire serialization: {type(value).__name__}")
 
@@ -80,11 +83,13 @@ def _encode_into(value: Any, out: bytearray) -> None:
 def encode_value(value: Any) -> bytes:
     """Serialize a structured Python value into canonical binary bytes."""
     buf = bytearray()
-    _encode_into(value, buf)
+    _encode_into(value, buf, 0)
     return bytes(buf)
 
 
-def _decode_from(data: memoryview, offset: int) -> tuple[Any, int]:
+def _decode_from(data: memoryview, offset: int, depth: int = 0) -> tuple[Any, int]:
+    if depth > _MAX_DEPTH:
+        raise SerializationError(f"Maximum wire nesting depth ({_MAX_DEPTH}) exceeded")
     if offset >= len(data):
         raise SerializationError("Unexpected end of wire payload")
     tag = data[offset]
@@ -103,6 +108,10 @@ def _decode_from(data: memoryview, offset: int) -> tuple[Any, int]:
         offset += 4
         if offset + length > len(data):
             raise SerializationError("Truncated integer payload")
+        if tag == _TAG_NEG_INT and length == 0:
+            raise SerializationError("Non-canonical negative zero integer in wire payload")
+        if length > 0 and data[offset] == 0:
+            raise SerializationError("Non-canonical leading zero byte in wire integer")
         mag = int.from_bytes(data[offset : offset + length], "big") if length > 0 else 0
         offset += length
         return (mag if tag == _TAG_POS_INT else -mag), offset
@@ -132,9 +141,11 @@ def _decode_from(data: memoryview, offset: int) -> tuple[Any, int]:
             raise SerializationError("Truncated list length")
         (count,) = _U32.unpack_from(data, offset)
         offset += 4
+        if count > len(data) - offset:
+            raise SerializationError("List element count exceeds remaining wire payload")
         items = []
         for _ in range(count):
-            elem, offset = _decode_from(data, offset)
+            elem, offset = _decode_from(data, offset, depth + 1)
             items.append(elem)
         return items, offset
     if tag == _TAG_DICT:
@@ -142,6 +153,8 @@ def _decode_from(data: memoryview, offset: int) -> tuple[Any, int]:
             raise SerializationError("Truncated dict length")
         (count,) = _U32.unpack_from(data, offset)
         offset += 4
+        if count > (len(data) - offset) // 5:
+            raise SerializationError("Dict entry count exceeds remaining wire payload")
         result: dict[str, Any] = {}
         for _ in range(count):
             if offset + 4 > len(data):
@@ -150,9 +163,14 @@ def _decode_from(data: memoryview, offset: int) -> tuple[Any, int]:
             offset += 4
             if offset + klen > len(data):
                 raise SerializationError("Truncated dict key")
-            key = bytes(data[offset : offset + klen]).decode("utf-8")
+            try:
+                key = bytes(data[offset : offset + klen]).decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise SerializationError("Invalid UTF-8 in wire dict key") from exc
+            if key in result:
+                raise SerializationError(f"Duplicate dict key in wire payload: {key!r}")
             offset += klen
-            val, offset = _decode_from(data, offset)
+            val, offset = _decode_from(data, offset, depth + 1)
             result[key] = val
         return result, offset
 
@@ -162,7 +180,7 @@ def _decode_from(data: memoryview, offset: int) -> tuple[Any, int]:
 def decode_value(data: bytes) -> Any:
     """Deserialize canonical binary bytes produced by :func:`encode_value`."""
     view = memoryview(data)
-    value, offset = _decode_from(view, 0)
+    value, offset = _decode_from(view, 0, 0)
     if offset != len(view):
         raise SerializationError(f"Trailing bytes in wire payload: {len(view) - offset}")
     return value

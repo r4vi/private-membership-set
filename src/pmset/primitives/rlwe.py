@@ -38,6 +38,10 @@ class RLWEParams:
             raise ValueError(f"Plaintext modulus t must be >= 2, got {self.t}")
         if self.q <= 2 * self.t:
             raise ValueError(f"Ciphertext modulus q must exceed 2*t, got q={self.q}, t={self.t}")
+        if self.q % self.t != 0:
+            raise ValueError(
+                f"Ciphertext modulus q ({self.q}) must be an exact multiple of plaintext modulus t ({self.t})"
+            )
         if self.noise_eta < 1:
             raise ValueError(f"noise_eta must be >= 1, got {self.noise_eta}")
 

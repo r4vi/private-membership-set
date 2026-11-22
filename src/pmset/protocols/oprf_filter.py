@@ -63,6 +63,11 @@ class ECDHOPRFFilterServer(PMSetServer):
         self._bloom: BloomFilter | None = None
 
         if filter_mode == "bloom":
+            if any(v is not None for v in dataset.values()):
+                raise ValueError(
+                    "ECDHOPRFFilterServer with filter_mode='bloom' does not support item payloads; "
+                    "use filter_mode='exact' for AEAD payload retrieval"
+                )
             bf = BloomFilter.for_capacity(len(dataset), false_positive_rate=false_positive_rate)
             for item_bytes in dataset.keys():
                 oprf_out = self._oprf.server_evaluate_direct(item_bytes, self._oprf_key)

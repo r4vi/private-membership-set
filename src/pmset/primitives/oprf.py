@@ -243,6 +243,7 @@ class RSAOPRFKey:
     n: int
     e: int
     d: int
+    lam: int | None = None
 
 
 class RSAOPRF(OPRF):
@@ -293,7 +294,7 @@ class RSAOPRF(OPRF):
                 n = p * q
                 d = ct_modinv(self.e, lam)
                 self.n = n
-                return RSAOPRFKey(n=n, e=self.e, d=d)
+                return RSAOPRFKey(n=n, e=self.e, d=d, lam=lam)
 
     def _hash_fdh(self, item: bytes, n: int) -> int:
         """Full-domain hash into Z_n* using SHAKE-256."""
@@ -330,7 +331,9 @@ class RSAOPRF(OPRF):
             raise ValueError("Invalid blinded RSA element")
         if math.gcd(blinded_element, server_key.n) != 1:
             raise ValueError("Blinded RSA element not coprime to modulus")
-        return ct_modexp(blinded_element, server_key.d, server_key.n)
+        return ct_modexp(
+            blinded_element, server_key.d, server_key.n, order=server_key.lam
+        )
 
     def client_finalize(self, item: bytes, evaluated_element: int, blind_state: int) -> bytes:
         from pmset.native import ct_modinv
@@ -343,7 +346,7 @@ class RSAOPRF(OPRF):
         from pmset.native import ct_modexp
 
         h = self._hash_fdh(item, server_key.n)
-        sig = ct_modexp(h, server_key.d, server_key.n)
+        sig = ct_modexp(h, server_key.d, server_key.n, order=server_key.lam)
         return self._finalize(item, sig, server_key.n)
 
 

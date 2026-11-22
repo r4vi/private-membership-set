@@ -96,9 +96,15 @@ class PublicParams:
 
     @classmethod
     def from_bytes(cls, data: bytes) -> PublicParams:
+        from pmset.core.serialization import SerializationError
+
         decoded = decode_value(data)
-        if not isinstance(decoded, dict) or "protocol" not in decoded or "params" not in decoded:
-            raise ValueError("Invalid PublicParams wire payload")
+        if (
+            not isinstance(decoded, dict)
+            or not isinstance(decoded.get("protocol"), str)
+            or not isinstance(decoded.get("params"), dict)
+        ):
+            raise SerializationError("Invalid PublicParams wire payload")
         return cls(protocol=decoded["protocol"], params=decoded["params"])
 
 
@@ -136,16 +142,41 @@ class ProtocolMessage:
 
     @classmethod
     def from_bytes(cls, data: bytes) -> ProtocolMessage:
+        from pmset.core.serialization import SerializationError
+
         decoded = decode_value(data)
         if not isinstance(decoded, dict):
-            raise ValueError("Invalid ProtocolMessage wire payload")
+            raise SerializationError("Invalid ProtocolMessage wire payload")
+        protocol = decoded.get("protocol")
+        phase = decoded.get("phase")
+        round_num = decoded.get("round_num")
+        payload = decoded.get("payload")
+        if (
+            not isinstance(protocol, str)
+            or not isinstance(phase, str)
+            or not isinstance(round_num, int)
+            or isinstance(round_num, bool)
+            or not isinstance(payload, dict)
+        ):
+            raise SerializationError("Malformed ProtocolMessage fields in wire payload")
         rep_raw = decoded.get("replica_payloads")
-        rep = {int(k): v for k, v in rep_raw.items()} if rep_raw is not None else None
+        rep: dict[int, dict[str, Any]] | None = None
+        if rep_raw is not None:
+            if not isinstance(rep_raw, dict):
+                raise SerializationError("Malformed replica_payloads in wire payload")
+            try:
+                rep = {}
+                for k, v in rep_raw.items():
+                    if not isinstance(v, dict):
+                        raise SerializationError("Replica payload entry must be a dict")
+                    rep[int(k)] = v
+            except ValueError as exc:
+                raise SerializationError("Replica ID keys must be integers") from exc
         return cls(
-            protocol=decoded["protocol"],
-            phase=decoded["phase"],
-            round_num=decoded["round_num"],
-            payload=decoded["payload"],
+            protocol=protocol,
+            phase=phase,
+            round_num=round_num,
+            payload=payload,
             replica_payloads=rep,
         )
 

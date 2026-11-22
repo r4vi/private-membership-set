@@ -49,6 +49,7 @@ class CustomBuildHook(BuildHookInterface):
         force_include = build_data.setdefault("force_include", {})
 
         # 1. Build OpenSSL backend
+        built_any_native = False
         ossl_src = ndir / "pmset_ct_openssl.c"
         ossl_out = ndir / f"libpmset_ct_openssl{ext}"
         if ossl_src.is_file():
@@ -60,6 +61,7 @@ class CustomBuildHook(BuildHookInterface):
             proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
             if proc.returncode == 0 and ossl_out.is_file():
                 force_include[str(ossl_out)] = f"pmset/_native/{ossl_out.name}"
+                built_any_native = True
 
         # 2. Build AWS-LC backend (statically linked & symbol-isolated) when AWS-LC is present
         awslc_src = ndir / "pmset_ct_awslc.c"
@@ -83,3 +85,22 @@ class CustomBuildHook(BuildHookInterface):
             proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
             if proc.returncode == 0 and awslc_out.is_file():
                 force_include[str(awslc_out)] = f"pmset/_native/{awslc_out.name}"
+                built_any_native = True
+
+        if built_any_native:
+            build_data["pure_python"] = False
+            build_data["infer_tag"] = True
+
+        # 3. Bundle TLA+ and Lean 4 formal verification sources into the wheel
+        tla_dir = root / "verification" / "tla"
+        if tla_dir.is_dir():
+            for f in tla_dir.iterdir():
+                if f.is_file() and f.suffix in (".tla", ".cfg"):
+                    force_include[str(f)] = f"pmset/_verification_assets/tla/{f.name}"
+
+        lean_dir = root / "verification" / "lean"
+        if lean_dir.is_dir():
+            for f in lean_dir.rglob("*"):
+                if f.is_file() and ".lake" not in f.parts:
+                    rel = f.relative_to(lean_dir).as_posix()
+                    force_include[str(f)] = f"pmset/_verification_assets/lean/{rel}"

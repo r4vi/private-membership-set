@@ -18,6 +18,7 @@
 
 #include "pmset_ct.h"
 
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -32,12 +33,14 @@
 #error "pmset_ct_awslc.c must be compiled against AWS-LC headers (OPENSSL_IS_AWSLC not defined)"
 #endif
 
+static pthread_once_t g_awslc_init_once = PTHREAD_ONCE_INIT;
+
+static void do_awslc_init(void) {
+    CRYPTO_library_init();
+}
+
 static void ensure_awslc_init(void) {
-    static int initialized = 0;
-    if (!initialized) {
-        CRYPTO_library_init();
-        initialized = 1;
-    }
+    pthread_once(&g_awslc_init_once, do_awslc_init);
 }
 
 const char *pmset_ct_provider_name(void) {
@@ -66,6 +69,7 @@ int pmset_ct_modexp(
     int rc = -1;
     BN_CTX *ctx = BN_CTX_new();
     BIGNUM *bn_base = NULL, *bn_exp = NULL, *bn_mod = NULL, *bn_res = NULL;
+    uint8_t *one_buf = NULL;
     if (!ctx) goto cleanup;
 
     bn_base = BN_bin2bn(base, base_len, NULL);
@@ -79,6 +83,16 @@ int pmset_ct_modexp(
         goto cleanup;
     }
 
+    if (BN_nnmod(bn_base, bn_base, bn_mod, ctx) != 1) {
+        rc = -3;
+        goto cleanup;
+    }
+
+    uint8_t is_zero_exp = (uint8_t)(BN_is_zero(bn_exp) & 1);
+    if (is_zero_exp) {
+        if (!BN_copy(bn_exp, bn_mod)) { rc = -3; goto cleanup; }
+    }
+
     if (BN_mod_exp_mont_consttime(bn_res, bn_base, bn_exp, bn_mod, ctx, NULL) != 1) {
         rc = -3;
         goto cleanup;
@@ -88,9 +102,16 @@ int pmset_ct_modexp(
         rc = -4;
         goto cleanup;
     }
+    if (out_len > 0) {
+        one_buf = (uint8_t *)calloc(out_len, 1);
+        if (!one_buf) { rc = -1; goto cleanup; }
+        one_buf[out_len - 1] = 1u;
+        pmset_ct_select_bytes(out, out, one_buf, out_len, is_zero_exp);
+    }
     rc = 0;
 
 cleanup:
+    free(one_buf);
     BN_clear_free(bn_base);
     BN_clear_free(bn_exp);
     BN_clear_free(bn_mod);
@@ -130,12 +151,13 @@ int pmset_ct_modexp_order(
     }
 
     if (!BN_is_odd(bn_mod) || BN_is_zero(bn_ord)) { rc = -2; goto cleanup; }
+    if (BN_nnmod(bn_base, bn_base, bn_mod, ctx) != 1) { rc = -3; goto cleanup; }
 
     /* Joye constant-bit-length exponent padding:
      * e1 = (exp mod ord) + ord; e2 = e1 + ord.
      * Select e1 if bit L is set, else e2, via branchless pmset_ct_select_bytes. */
     unsigned int L = BN_num_bits(bn_ord);
-    if (BN_mod(bn_exp, bn_exp, bn_ord, ctx) != 1) { rc = -3; goto cleanup; }
+    if (BN_nnmod(bn_exp, bn_exp, bn_ord, ctx) != 1) { rc = -3; goto cleanup; }
     if (BN_add(e1, bn_exp, bn_ord) != 1) { rc = -3; goto cleanup; }
     if (BN_add(e2, e1, bn_ord) != 1) { rc = -3; goto cleanup; }
 
@@ -191,7 +213,16 @@ int pmset_ct_modinv(
     bn_res = BN_new();
     if (!bn_a || !bn_mod || !bn_res) goto cleanup;
 
-    if (BN_is_odd(bn_mod) && !BN_is_one(bn_mod)) {
+    if (BN_is_zero(bn_mod) || BN_is_one(bn_mod)) {
+        rc = -2;
+        goto cleanup;
+    }
+    if (BN_nnmod(bn_a, bn_a, bn_mod, ctx) != 1) {
+        rc = -2;
+        goto cleanup;
+    }
+
+    if (BN_is_odd(bn_mod)) {
         /* Use AWS-LC constant-time blinded modular inversion for odd moduli */
         mont = BN_MONT_CTX_new_for_modulus(bn_mod, ctx);
         if (!mont) { rc = -2; goto cleanup; }

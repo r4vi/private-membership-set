@@ -47,6 +47,8 @@ def _ints_to_bytes(values: Sequence[int], chunk_size: int, total_len: int) -> by
     remaining = total_len
     for val in values:
         take = min(chunk_size, remaining)
+        if val < 0 or val >= (1 << (8 * take)):
+            raise ValueError(f"Decoded PIR chunk value out of range for {take}-byte chunk")
         out.extend(val.to_bytes(take, "big"))
         remaining -= take
         if remaining == 0:
@@ -135,7 +137,7 @@ class PaillierLinearPIR(SingleServerPIR):
             for i in range(num_buckets):
                 val = encoded[i][j]
                 acc = pk.add(acc, pk.mul_scalar(vec[i], val))
-            response_chunks.append(acc)
+            response_chunks.append(pk.rerandomize(acc))
         return {
             "chunks": response_chunks,
             "chunk_size": chunk_size,
@@ -225,7 +227,7 @@ class Paillier2DPIR(SingleServerPIR):
                 for r in range(rows):
                     val = encoded[r * cols + c][j]
                     acc = pk.add(acc, pk.mul_scalar(row_vec[r], val))
-                col_chunks.append(acc)
+                col_chunks.append(pk.rerandomize(acc))
             selected_row.append(col_chunks)
         return {
             "selected_row": selected_row,

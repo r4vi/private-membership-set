@@ -28,6 +28,16 @@ def _find_repo_root() -> Path:
     return Path.cwd()
 
 
+def _find_tla_dir() -> Path:
+    repo_tla = _find_repo_root() / "verification" / "tla"
+    if repo_tla.is_dir():
+        return repo_tla
+    bundled_tla = Path(__file__).resolve().parent.parent / "_verification_assets" / "tla"
+    if bundled_tla.is_dir():
+        return bundled_tla
+    return repo_tla
+
+
 def find_tla2tools_jar() -> Path | None:
     """Locate ``tla2tools.jar`` via env var or standard local paths."""
     env_path = os.environ.get("TLA2TOOLS_JAR")
@@ -52,7 +62,7 @@ class TLAVerifier(FormalVerifier):
         tla_dir: Path | None = None,
         tla2tools_jar: Path | None = None,
     ) -> None:
-        self._tla_dir = tla_dir or (_find_repo_root() / "verification" / "tla")
+        self._tla_dir = tla_dir or _find_tla_dir()
         self._jar = tla2tools_jar or find_tla2tools_jar()
         self._spec_cache: dict[str, PropertyResult] = {}
 

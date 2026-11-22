@@ -41,21 +41,37 @@ int pmset_ct_modexp(
     int rc = -1;
     BN_CTX *ctx = BN_CTX_secure_new();
     BIGNUM *bn_base = NULL, *bn_exp = NULL, *bn_mod = NULL, *bn_res = NULL;
+    uint8_t *one_buf = NULL;
     if (!ctx) goto cleanup;
 
-    bn_base = BN_bin2bn(base, (int)base_len, NULL);
+    bn_base = BN_secure_new();
     bn_exp = BN_secure_new();
     bn_mod = BN_bin2bn(mod, (int)mod_len, NULL);
-    bn_res = BN_new();
+    bn_res = BN_secure_new();
     if (!bn_base || !bn_exp || !bn_mod || !bn_res) goto cleanup;
 
+    if (!BN_bin2bn(base, (int)base_len, bn_base)) goto cleanup;
     if (!BN_bin2bn(exp, (int)exp_len, bn_exp)) goto cleanup;
-    BN_set_flags(bn_exp, BN_FLG_CONSTTIME);
-    BN_set_flags(bn_base, BN_FLG_CONSTTIME);
 
     if (!BN_is_odd(bn_mod) || BN_is_zero(bn_mod) || BN_is_one(bn_mod)) {
         rc = -2;
         goto cleanup;
+    }
+
+    BN_set_flags(bn_base, BN_FLG_CONSTTIME);
+    BN_set_flags(bn_exp, BN_FLG_CONSTTIME);
+    if (BN_nnmod(bn_base, bn_base, bn_mod, ctx) != 1) {
+        rc = -3;
+        goto cleanup;
+    }
+
+    /* Prevent BN_mod_exp_mont_consttime from short-circuiting when exp == 0:
+     * swap in bn_mod as a dummy non-zero exponent if exp == 0, then constant-time
+     * select 1 (mod mod) vs bn_res in the output buffer. */
+    uint8_t is_zero_exp = (uint8_t)(BN_is_zero(bn_exp) & 1);
+    if (is_zero_exp) {
+        if (!BN_copy(bn_exp, bn_mod)) { rc = -3; goto cleanup; }
+        BN_set_flags(bn_exp, BN_FLG_CONSTTIME);
     }
 
     if (BN_mod_exp_mont_consttime(bn_res, bn_base, bn_exp, bn_mod, ctx, NULL) != 1) {
@@ -67,9 +83,16 @@ int pmset_ct_modexp(
         rc = -4;
         goto cleanup;
     }
+    if (out_len > 0) {
+        one_buf = (uint8_t *)calloc(out_len, 1);
+        if (!one_buf) { rc = -1; goto cleanup; }
+        one_buf[out_len - 1] = 1u;
+        pmset_ct_select_bytes(out, out, one_buf, out_len, is_zero_exp);
+    }
     rc = 0;
 
 cleanup:
+    free(one_buf);
     BN_clear_free(bn_base);
     BN_clear_free(bn_exp);
     BN_clear_free(bn_mod);
@@ -90,20 +113,25 @@ int pmset_ct_modexp_order(
     BIGNUM *e1 = NULL, *e2 = NULL, *bn_res = NULL;
     if (!ctx) goto cleanup;
 
-    bn_base = BN_bin2bn(base, (int)base_len, NULL);
+    bn_base = BN_secure_new();
     bn_exp = BN_secure_new();
     bn_ord = BN_bin2bn(order, (int)order_len, NULL);
     bn_mod = BN_bin2bn(mod, (int)mod_len, NULL);
     e1 = BN_secure_new();
     e2 = BN_secure_new();
-    bn_res = BN_new();
+    bn_res = BN_secure_new();
     if (!bn_base || !bn_exp || !bn_ord || !bn_mod || !e1 || !e2 || !bn_res) goto cleanup;
 
+    if (!BN_bin2bn(base, (int)base_len, bn_base)) goto cleanup;
     if (!BN_bin2bn(exp, (int)exp_len, bn_exp)) goto cleanup;
     if (!BN_is_odd(bn_mod) || BN_is_zero(bn_ord)) { rc = -2; goto cleanup; }
 
+    BN_set_flags(bn_base, BN_FLG_CONSTTIME);
+    BN_set_flags(bn_exp, BN_FLG_CONSTTIME);
+    if (BN_nnmod(bn_base, bn_base, bn_mod, ctx) != 1) { rc = -3; goto cleanup; }
+
     int L = BN_num_bits(bn_ord);
-    if (BN_mod(bn_exp, bn_exp, bn_ord, ctx) != 1) { rc = -3; goto cleanup; }
+    if (BN_nnmod(bn_exp, bn_exp, bn_ord, ctx) != 1) { rc = -3; goto cleanup; }
     if (BN_add(e1, bn_exp, bn_ord) != 1) { rc = -3; goto cleanup; }
     if (BN_add(e2, e1, bn_ord) != 1) { rc = -3; goto cleanup; }
 
@@ -111,7 +139,6 @@ int pmset_ct_modexp_order(
     BN_consttime_swap((BN_ULONG)(carry ^ 1), e1, e2, (L / BN_BITS2) + 2);
 
     BN_set_flags(e1, BN_FLG_CONSTTIME);
-    BN_set_flags(bn_base, BN_FLG_CONSTTIME);
 
     if (BN_mod_exp_mont_consttime(bn_res, bn_base, e1, bn_mod, ctx, NULL) != 1) {
         rc = -4;
@@ -149,9 +176,17 @@ int pmset_ct_modinv(
     bn_res = BN_secure_new();
     if (!bn_a || !bn_mod || !bn_res) goto cleanup;
 
+    if (BN_is_zero(bn_mod) || BN_is_one(bn_mod)) {
+        rc = -2;
+        goto cleanup;
+    }
     if (!BN_bin2bn(a, (int)a_len, bn_a)) goto cleanup;
     BN_set_flags(bn_a, BN_FLG_CONSTTIME);
     BN_set_flags(bn_mod, BN_FLG_CONSTTIME);
+    if (BN_nnmod(bn_a, bn_a, bn_mod, ctx) != 1) {
+        rc = -2;
+        goto cleanup;
+    }
 
     if (!BN_mod_inverse(bn_res, bn_a, bn_mod, ctx)) {
         rc = -2;

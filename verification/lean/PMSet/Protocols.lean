@@ -258,13 +258,37 @@ theorem chou_orlandi_ot_receiver_private (a b : Int) (c : Bool) :
   · exact ⟨b - a, by simp; omega⟩
   · exact ⟨a + b, by simp⟩
 
-/-- **10c. Garbled Bloom Filter + OT Completeness**:
-    If `k` retrieved OT shares XOR to `tag`, XORing the retrieved shares
-    (where OT selects `m1 = slot[i]` for `c = true`) recovers `tag` identically. -/
-theorem ot_garbled_bloom_correct (shares : List Nat) (tag : Nat)
+theorem zip_select_snd {α : Type} (xs ys : List α) (hlen : xs.length = ys.length) :
+    (xs.zip ys).map (fun pair => if true then pair.2 else pair.1) = ys := by
+  induction xs generalizing ys with
+  | nil =>
+    cases ys with
+    | nil => rfl
+    | cons _ _ => simp at hlen
+  | cons x xs ih =>
+    cases ys with
+    | nil => simp at hlen
+    | cons y ys =>
+      simp only [List.length_cons, Nat.add_right_cancel_iff] at hlen
+      have hrec := ih ys hlen
+      simpa [List.zip_cons_cons] using hrec
+
+/-- **10c. Garbled Bloom Filter + Chou-Orlandi OT End-to-End Completeness**:
+    For every queried GBF slot where the client sets choice bit `c = true`,
+    Chou-Orlandi OT selects `m1 = share` (ignoring server dummy `m0 = dummy`)
+    with matching sender/receiver key `k1 = b * a`, and XORing the retrieved
+    shares across all `k` hash positions reconstructs the exact item `tag`. -/
+theorem ot_garbled_bloom_correct (a b : Int) (dummies shares : List Nat) (tag : Nat)
     (hgbf : shares.foldl Nat.xor 0 = tag) :
-    (shares.map (fun s => (if true then s else 0))).foldl Nat.xor 0 = tag := by
-  simpa using hgbf
+    let otSelected := (dummies.zip shares).map (fun pair => if true then pair.2 else pair.1)
+    let k_recv := b * a
+    let k1 := a * ((a + b) - a)
+    (k1 = k_recv ∧ (dummies.length = shares.length → otSelected.foldl Nat.xor 0 = tag)) := by
+  intro otSelected k_recv k1
+  refine ⟨chou_orlandi_ot_correct a b true, ?_⟩
+  intro hlen
+  dsimp only [otSelected]
+  rw [zip_select_snd dummies shares hlen, hgbf]
 
 /-! ### 11. 2-Server DPF/FSS PIR + P-256 ECDH-OPRF (BGI15) -/
 
